@@ -55,7 +55,15 @@
     "files": [
       "out/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources",
+        "filter": ["**/*"]
+      }
+    ],
     "mac": {
+      "icon": "resources/icon.png",
       "target": [
         "dmg",
         "zip"

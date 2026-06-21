@@ -271,8 +271,16 @@ function createWindow() {
   })
 }
 
+function resolveIconPath(): string {
+  const packaged = path.join(process.resourcesPath, 'resources/icon.png')
+  if (app.isPackaged && fs.existsSync(packaged)) {
+    return packaged
+  }
+  return path.join(__dirname, '../../resources/icon.png')
+}
+
 function createTray() {
-  const iconPath = path.join(__dirname, '../../resources/icon.png')
+  const iconPath = resolveIconPath()
   let icon: Electron.NativeImage
 
   if (fs.existsSync(iconPath)) {
