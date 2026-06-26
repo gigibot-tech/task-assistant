@@ -15,9 +15,14 @@ export interface TaskTimeStatus {
   isPaused: boolean
   recordedSeconds: number
   liveSeconds: number
+  breakSeconds: number
+  pauseSeconds: number
   currentSessionStartedAt: string | null
   sessionCount: number
 }
+
+const BREAK_PAUSE_REASONS: PauseReason[] = ['break', 'user', 'snooze']
+const PAUSE_REASONS: PauseReason[] = ['task_switch', 'system']
 
 function parseMs(iso: string): number {
   const ms = new Date(iso).getTime()
@@ -50,10 +55,83 @@ export function computeRecordedSeconds(task: { work_sessions?: WorkSession[] }):
     .reduce((sum, s) => sum + sessionDurationSeconds(s), 0)
 }
 
-export function getTaskTimeStatus(task: { id: string; work_sessions?: WorkSession[] }): TaskTimeStatus {
+/** Gaps between work sessions when the previous pause was a break (incl. ongoing break). */
+export function computeBreakSeconds(
+  task: { work_sessions?: WorkSession[] },
+  nowMs = Date.now()
+): number {
+  const sessions = [...getWorkSessions(task)].sort(
+    (a, b) => parseMs(a.started_at) - parseMs(b.started_at)
+  )
+  let total = 0
+
+  for (let i = 1; i < sessions.length; i++) {
+    const prev = sessions[i - 1]
+    const curr = sessions[i]
+    if (!prev.ended_at) continue
+    const reason = prev.pause_reason ?? 'user'
+    if (!BREAK_PAUSE_REASONS.includes(reason)) continue
+    const gapMs = parseMs(curr.started_at) - parseMs(prev.ended_at)
+    if (gapMs > 0) total += Math.floor(gapMs / 1000)
+  }
+
+  const open = getOpenSession(task)
+  if (!open && sessions.length > 0) {
+    const last = sessions[sessions.length - 1]
+    if (last.ended_at) {
+      const reason = last.pause_reason ?? 'user'
+      if (BREAK_PAUSE_REASONS.includes(reason)) {
+        total += Math.max(0, Math.floor((nowMs - parseMs(last.ended_at)) / 1000))
+      }
+    }
+  }
+
+  return total
+}
+
+/** Gaps between work sessions when paused (task_switch, system) - excluding breaks. */
+export function computePauseSeconds(
+  task: { work_sessions?: WorkSession[] },
+  nowMs = Date.now()
+): number {
+  const sessions = [...getWorkSessions(task)].sort(
+    (a, b) => parseMs(a.started_at) - parseMs(b.started_at)
+  )
+  let total = 0
+
+  for (let i = 1; i < sessions.length; i++) {
+    const prev = sessions[i - 1]
+    const curr = sessions[i]
+    if (!prev.ended_at) continue
+    const reason = prev.pause_reason ?? 'user'
+    if (!PAUSE_REASONS.includes(reason)) continue
+    const gapMs = parseMs(curr.started_at) - parseMs(prev.ended_at)
+    if (gapMs > 0) total += Math.floor(gapMs / 1000)
+  }
+
+  const open = getOpenSession(task)
+  if (!open && sessions.length > 0) {
+    const last = sessions[sessions.length - 1]
+    if (last.ended_at) {
+      const reason = last.pause_reason ?? 'user'
+      if (PAUSE_REASONS.includes(reason)) {
+        total += Math.max(0, Math.floor((nowMs - parseMs(last.ended_at)) / 1000))
+      }
+    }
+  }
+
+  return total
+}
+
+export function getTaskTimeStatus(
+  task: { id: string; work_sessions?: WorkSession[] },
+  nowMs = Date.now()
+): TaskTimeStatus {
   const open = getOpenSession(task)
   const recordedSeconds = computeRecordedSeconds(task)
-  const liveSeconds = computeLiveSeconds(task)
+  const liveSeconds = computeLiveSeconds(task, nowMs)
+  const breakSeconds = computeBreakSeconds(task, nowMs)
+  const pauseSeconds = computePauseSeconds(task, nowMs)
 
   return {
     taskId: task.id,
@@ -61,6 +139,8 @@ export function getTaskTimeStatus(task: { id: string; work_sessions?: WorkSessio
     isPaused: !open && getWorkSessions(task).length > 0 && liveSeconds === recordedSeconds,
     recordedSeconds,
     liveSeconds,
+    breakSeconds,
+    pauseSeconds,
     currentSessionStartedAt: open?.started_at ?? null,
     sessionCount: getWorkSessions(task).length
   }
@@ -172,4 +252,39 @@ export function pauseOpenSessionIfAny(
     return task
   }
   return pauseWorkSession(task, reason, now)
+}
+
+/**
+ * Credit work done while the app was closed after a break-pause on quit.
+ */
+export function allocateOfflineWorkTime(
+  task: Record<string, unknown>,
+  offlineStartIso: string,
+  workMinutes: number,
+  now = new Date()
+): Record<string, unknown> {
+  const workMins = Math.max(0, Math.round(workMinutes))
+  let sessions = [...getWorkSessions(task as { work_sessions?: WorkSession[] })]
+
+  if (workMins > 0) {
+    const startMs = parseMs(offlineStartIso)
+    const endMs = startMs + workMins * 60 * 1000
+    if (endMs <= now.getTime()) {
+      sessions.push({
+        id: uuidv4(),
+        started_at: offlineStartIso,
+        ended_at: new Date(endMs).toISOString(),
+        pause_reason: 'system'
+      })
+      sessions.sort((a, b) => parseMs(a.started_at) - parseMs(b.started_at))
+    }
+  }
+
+  const liveSeconds = computeLiveSeconds({ work_sessions: sessions }, now.getTime())
+  return {
+    ...task,
+    work_sessions: sessions,
+    recorded_seconds: computeRecordedSeconds({ work_sessions: sessions }),
+    actual_minutes: Math.round(liveSeconds / 60)
+  }
 }

@@ -17,6 +17,12 @@ import {
 } from './monitoringSchedule'
 import axios from 'axios'
 import {
+  clearOllamaFailure,
+  isOllamaFailure,
+  isOllamaPaused,
+  recordOllamaFailure
+} from './ollamaFailure'
+import {
   checkpointAllTasks,
   completeTaskWork,
   findRunningTaskId,
@@ -24,8 +30,10 @@ import {
   migrateAllTaskTimes,
   pauseTaskWork,
   resumeTaskWork,
-  startTaskWork
+  startTaskWork,
+  allocateTaskOfflineTime
 } from './timeTrackingService'
+import { getOpenSession } from './timeTracking'
 import {
   configurePomodoro,
   defaultPomodoroSettings,
@@ -46,6 +54,7 @@ import {
   type FocusCaptureRecord
 } from './screenshotSimilarity'
 import { shouldSendAlert } from './alertCooldown'
+import { estimateSubtaskMinutes, estimateTaskMinutes } from './taskEstimate'
 import { defaultWorkplaceSettings } from './workplace/workplacePaths'
 import {
   indexTaskWorkplace,
@@ -63,7 +72,8 @@ import {
 import { taskSubtaskContextFromTask } from './subtaskProbe/subtaskFocusContext'
 import {
   DEFAULT_FEATURE_FLAGS,
-  getFeatureFlagsFromSettings
+  getFeatureFlagsFromSettings,
+  mergeFeatureFlags
 } from './features/registry'
 import {
   getFeatureBus,
@@ -72,7 +82,30 @@ import {
   runAfterPipeline
 } from './features/kernel/register'
 import { registerFeatureIpc } from './features/kernel/ipcRouter'
+import {
+  getActiveWorkplacePath,
+  mergeTaskUpdate,
+  normalizeTaskWorkspaces,
+  type TaskWithWorkspaces
+} from '../../src/shared/workplace/workspaces'
 import type { DomainEvent, FeatureContext } from '../../src/shared/kernel/types'
+import {
+  applySemanticSorterMoves,
+  getSemanticSorterSettingsFromData,
+  runSemanticSorterDryRun,
+  saveSemanticSorterFeedback
+} from './semanticSorter/semanticSorter'
+import { DEFAULT_SEMANTIC_SORTER_SETTINGS } from './semanticSorter/semanticSorterPaths'
+import {
+  DEFAULT_OLLAMA_NUM_PREDICT,
+  getOllamaNumPredict
+} from './ollamaSettings'
+import { computeVisionBudget } from './visionPayload'
+import { indexReviewWorktree } from './review/reviewIndexer'
+import {
+  applyScheduleToStatuses,
+  generateReviewSchedule
+} from './review/reviewScheduler'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -87,6 +120,7 @@ let snoozeUntil: number | null = null
 let snoozeResumeTimeout: ReturnType<typeof setTimeout> | null = null
 let timeCheckpointInterval: ReturnType<typeof setInterval> | null = null
 let pomodoroCyclesCompleted = 0
+let appIsQuitting = false
 
 const DEVIATION_ALERT_COOLDOWN_MS = 5 * 60 * 1000
 const STALE_ALERT_COOLDOWN_MS = 30 * 60 * 1000
@@ -123,6 +157,7 @@ function initDataStorage() {
       communications: [],
       settings: {
         ollamaModel: DEFAULT_OLLAMA_MODEL,
+        ollamaNumPredict: DEFAULT_OLLAMA_NUM_PREDICT,
         deviationThreshold: 0.7,
         pollIntervalMinutes: 5,
         activeTaskId: null,
@@ -131,6 +166,7 @@ function initDataStorage() {
         lastOnTask: null,
         lastFocusNote: '',
         lastCheckedTaskId: null,
+        lastScreenCaptureSimilarity: null,
         nextCheckAt: null,
         screenPermissionPrompted: false,
         autoScreenshotMonitoring: true,
@@ -150,7 +186,8 @@ function initDataStorage() {
         },
         recordOffTaskWasted: true,
         featureFlags: { ...DEFAULT_FEATURE_FLAGS },
-        ...defaultWorkplaceSettings()
+        ...defaultWorkplaceSettings(),
+        semanticSorter: { ...DEFAULT_SEMANTIC_SORTER_SETTINGS }
       }
     }
     fs.writeFileSync(dataPath, JSON.stringify(initialData, null, 2))
@@ -168,7 +205,14 @@ function writeData(data: any) {
 
 function migratePersistedData() {
   const data = readData()
-  data.tasks = migrateAllTaskTimes(data.tasks || [])
+  data.tasks = migrateAllTaskTimes(data.tasks || []).map((task: TaskWithWorkspaces) =>
+    normalizeTaskWorkspaces(task)
+  )
+  data.settings = data.settings || {}
+  data.settings.featureFlags = mergeFeatureFlags(data.settings.featureFlags)
+  if (!data.settings.semanticSorter) {
+    data.settings.semanticSorter = { ...DEFAULT_SEMANTIC_SORTER_SETTINGS }
+  }
   writeData(data)
 }
 
@@ -219,6 +263,35 @@ function sendNotification(payload: Record<string, unknown>) {
   mainWindow?.webContents.send('notification', payload)
 }
 
+async function scheduleTaskEstimateAfterCreate(taskId: string) {
+  try {
+    const data = readData()
+    const task = data.tasks.find((t: { id: string }) => t.id === taskId)
+    if (!task || task.ai_estimate_minutes || !task.title?.trim()) return
+
+    const health = await checkOllamaHealth()
+    if (!health.online || !health.modelAvailable) return
+
+    const result = await estimateTaskMinutes(getOllamaModel(), task, data.settings || {})
+    const idx = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
+    if (idx === -1) return
+
+    data.tasks[idx] = {
+      ...data.tasks[idx],
+      ai_estimate_minutes: result.estimate,
+      updated_at: new Date().toISOString()
+    }
+    writeData(data)
+
+    sendNotification({
+      type: 'task_estimate_ready',
+      data: { taskId, estimate: result.estimate, confidence: result.confidence }
+    })
+  } catch (err) {
+    console.warn('[estimate] Auto-estimate on create failed:', err instanceof Error ? err.message : err)
+  }
+}
+
 function persistNextCheckAt(nextAt: number | null) {
   const data = readData()
   data.settings = { ...data.settings, nextCheckAt: nextAt }
@@ -243,6 +316,54 @@ function broadcastMonitoringState(nextCheckAt?: number | null) {
   })
 }
 
+function checkOpenSessionsOnStartup() {
+  const data = readData()
+  const tasks = data.tasks || []
+
+  const pending = data.settings?.pendingOfflineCheck as
+    | { taskId: string; taskTitle: string; sessionEndedAt: string }
+    | undefined
+
+  if (pending?.taskId && pending.sessionEndedAt) {
+    const offlineMinutes = Math.floor(
+      (Date.now() - new Date(pending.sessionEndedAt).getTime()) / 60000
+    )
+    if (offlineMinutes > 5) {
+      sendNotification({
+        type: 'offline_time_prompt',
+        data: {
+          taskId: pending.taskId,
+          taskTitle: pending.taskTitle,
+          offlineMinutes,
+          sessionStartedAt: pending.sessionEndedAt
+        }
+      })
+    }
+    return
+  }
+
+  for (const task of tasks) {
+    const open = getOpenSession(task)
+    if (!open) continue
+
+    const offlineMinutes = Math.floor(
+      (Date.now() - new Date(open.started_at).getTime()) / 60000
+    )
+
+    if (offlineMinutes > 5) {
+      sendNotification({
+        type: 'offline_time_prompt',
+        data: {
+          taskId: task.id,
+          taskTitle: task.title,
+          offlineMinutes,
+          sessionStartedAt: open.started_at
+        }
+      })
+    }
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -265,6 +386,13 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
   }
+
+  // Check for open sessions after window loads
+  mainWindow.webContents.once('did-finish-load', () => {
+    setTimeout(() => {
+      checkOpenSessionsOnStartup()
+    }, 1000) // Wait 1 second for UI to be ready
+  })
 
   mainWindow.on('closed', () => {
     mainWindow = null
@@ -378,13 +506,22 @@ function persistFocusCheckResult(
   const taskIndex = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
   if (taskIndex !== -1 && result.imagePath) {
     const task = data.tasks[taskIndex]
+    const captureHistory = appendFocusCapture(
+      task.focus_capture_history as FocusCaptureRecord[] | undefined,
+      result.imagePath
+    )
+    const screenStats = analyzeCaptureHistory(captureHistory)
+
     const nextTask: Record<string, unknown> = {
       ...task,
-      focus_capture_history: appendFocusCapture(
-        task.focus_capture_history as FocusCaptureRecord[] | undefined,
-        result.imagePath
-      ),
+      focus_capture_history: captureHistory,
       updated_at: new Date().toISOString()
+    }
+
+    data.settings = {
+      ...data.settings,
+      lastScreenCaptureSimilarity:
+        screenStats.sampleCount >= 2 ? screenStats.averageSimilarity : null
     }
 
     if (result.onTask && result.similarity >= threshold) {
@@ -454,7 +591,8 @@ function focusCheckOptionsForTask(
     : {}
   return {
     ...base,
-    featureFlags: getFeatureFlagsFromSettings(settings)
+    featureFlags: getFeatureFlagsFromSettings(settings),
+    numPredict: getOllamaNumPredict(settings, 'vision')
   }
 }
 
@@ -464,6 +602,11 @@ function notifyFocusCheckComplete(
   result: Awaited<ReturnType<typeof checkDeviationFromScreen>>,
   nextCheckAt: number | null
 ) {
+  const fresh = readData()
+  const settings = fresh.settings || {}
+  const task = fresh.tasks.find((t: { id: string }) => t.id === taskId) ?? {}
+  const screenStats = screenStatsForTask(task)
+
   sendNotification({
     type: 'focus_check_complete',
     data: {
@@ -476,9 +619,13 @@ function notifyFocusCheckComplete(
       severity: result.severity,
       nextCheckAt,
       checkInProgress: false,
-      screenCaptureSimilarity: screenStatsForTask(
-        readData().tasks.find((t: { id: string }) => t.id === taskId) ?? {}
-      ).averageSimilarity
+      checkedAt: settings.lastActivityDetectedAt ?? new Date().toISOString(),
+      screenCaptureSimilarity:
+        typeof settings.lastScreenCaptureSimilarity === 'number'
+          ? settings.lastScreenCaptureSimilarity
+          : screenStats.sampleCount >= 2
+            ? screenStats.averageSimilarity
+            : null
     }
   })
 }
@@ -494,8 +641,7 @@ async function sendDeviationAlert(
 
   if (
     settings.workplaceGuidanceEnabled !== false &&
-    task.workplace_folder &&
-    task.workplace_folder.trim()
+    getActiveWorkplacePath(task)
   ) {
     try {
       const wpSettings = getWorkplaceSettingsFromData(data)
@@ -612,7 +758,38 @@ function maybeNotifyStaleProgress(task: any, settings: Record<string, any>) {
   return stale
 }
 
+function notifyOllamaUnavailable(
+  message: string,
+  pausedUntil: number,
+  model: string
+) {
+  sendNotification({
+    type: 'ollama_unavailable',
+    data: { message, pausedUntil, model }
+  })
+  void showNativeNotification({
+    title: 'Ollama unavailable — screen checks paused',
+    body: `${message}. Retrying after ${new Date(pausedUntil).toLocaleTimeString()}.`,
+    subtitle: 'Task Assistant'
+  })
+}
+
+function applyOllamaPollFailure(
+  data: ReturnType<typeof readData>,
+  error: Error
+): number {
+  data.settings = recordOllamaFailure(data.settings || {}, error)
+  writeData(data)
+  const pausedUntil = data.settings.ollamaPausedUntil as number
+  notifyOllamaUnavailable(error.message, pausedUntil, getOllamaModel())
+  scheduleCheckAt(pausedUntil, () => runDeviationCheck(true))
+  persistNextCheckAt(pausedUntil)
+  broadcastMonitoringState(pausedUntil)
+  return pausedUntil
+}
+
 async function runDeviationCheck(fromPoll = false) {
+  if (appIsQuitting) return
   if (fromPoll && isCheckInProgress()) return
 
   if (snoozeUntil && Date.now() < snoozeUntil) {
@@ -632,12 +809,36 @@ async function runDeviationCheck(fromPoll = false) {
   if (!activeTaskId) return
   if (settings.autoScreenshotMonitoring === false) return
 
+  if (fromPoll && isOllamaPaused(settings)) {
+    const pausedUntil = settings.ollamaPausedUntil as number
+    scheduleCheckAt(pausedUntil, () => runDeviationCheck(true))
+    persistNextCheckAt(pausedUntil)
+    broadcastMonitoringState(pausedUntil)
+    return
+  }
+
+  if (fromPoll) {
+    const health = await checkOllamaHealth()
+    if (!health.online) {
+      applyOllamaPollFailure(data, new Error('Ollama is offline — start it with: ollama serve'))
+      return
+    }
+    if (!health.modelAvailable) {
+      applyOllamaPollFailure(
+        data,
+        new Error(`Model "${health.model}" is not loaded — run: ollama run ${health.model}`)
+      )
+      return
+    }
+  }
+
   const task = data.tasks.find((t: any) => t.id === activeTaskId)
   if (!task || task.status === 'completed') return
 
   const taskContext = taskFocusContext(task)
   const threshold = settings.deviationThreshold ?? 0.7
   let nextCheckAt: number | null = null
+  const ollamaWasPaused = isOllamaPaused(settings)
 
   setCheckInProgress(true)
   sendNotification({ type: 'monitoring_check_started', data: { checkInProgress: true } })
@@ -664,10 +865,20 @@ async function runDeviationCheck(fromPoll = false) {
       getOllamaModel(),
       taskContext,
       true,
-      focusCheckOptionsForTask(task, settings)
+      {
+        ...focusCheckOptionsForTask(task, settings),
+        showErrorDialog: !fromPoll
+      }
     )
 
     persistFocusCheckResult(data, activeTaskId, result, threshold)
+
+    const afterSuccess = readData()
+    afterSuccess.settings = clearOllamaFailure(afterSuccess.settings || {})
+    writeData(afterSuccess)
+    if (ollamaWasPaused) {
+      sendNotification({ type: 'ollama_recovered', data: { model: getOllamaModel() } })
+    }
 
     const refreshedTask =
       readData().tasks.find((t: { id: string }) => t.id === activeTaskId) ?? task
@@ -686,6 +897,81 @@ async function runDeviationCheck(fromPoll = false) {
 
       logDeviation({ ...alertData, fromPoll })
       await sendDeviationAlert(alertData, result, refreshedTask)
+      
+      // Auto-pause task when off-task
+      try {
+        const currentData = readData()
+        const { tasks: updatedTasks } = pauseTaskWork(currentData.tasks, activeTaskId, 'system')
+        currentData.tasks = updatedTasks
+        writeData(currentData)
+        console.log('[auto-pause] Task paused due to off-task detection')
+        sendNotification({
+          type: 'task_auto_paused',
+          data: {
+            taskId: activeTaskId,
+            taskTitle: task.title,
+            reason: 'Off-task activity detected'
+          }
+        })
+        
+        // Show native notification with resume action
+        void showNativeNotification({
+          title: `Task paused — ${task.title}`,
+          body: 'Off-task activity detected. Click to resume task.',
+          onClick: () => {
+            // Resume task when notification is clicked
+            try {
+              const data = readData()
+              const { tasks: resumedTasks } = resumeTaskWork(data.tasks, activeTaskId)
+              data.tasks = resumedTasks
+              writeData(data)
+              console.log('[auto-pause] Task manually resumed via notification click')
+              sendNotification({
+                type: 'task_auto_resumed',
+                data: {
+                  taskId: activeTaskId,
+                  taskTitle: task.title
+                }
+              })
+              void showNativeNotification({
+                title: `Task resumed — ${task.title}`,
+                body: 'You\'re back on track!'
+              })
+            } catch (err) {
+              console.error('[auto-pause] Failed to resume task from notification:', err)
+            }
+          }
+        })
+      } catch (err) {
+        console.error('[auto-pause] Failed to pause task:', err)
+      }
+    } else {
+      // Auto-resume task when back on-task
+      try {
+        const currentData = readData()
+        const timeStatus = getTaskTimeStatusFromList(currentData.tasks, activeTaskId)
+        if (timeStatus && timeStatus.isPaused) {
+          const { tasks: updatedTasks } = resumeTaskWork(currentData.tasks, activeTaskId)
+          currentData.tasks = updatedTasks
+          writeData(currentData)
+          console.log('[auto-resume] Task resumed - back on task')
+          sendNotification({
+            type: 'task_auto_resumed',
+            data: {
+              taskId: activeTaskId,
+              taskTitle: task.title
+            }
+          })
+          
+          // Show native notification confirming auto-resume
+          void showNativeNotification({
+            title: `Task resumed — ${task.title}`,
+            body: 'You\'re back on track! Task automatically resumed.'
+          })
+        }
+      } catch (err) {
+        console.error('[auto-resume] Failed to resume task:', err)
+      }
     }
 
     maybeNotifyStaleProgress(refreshedTask, settings)
@@ -699,15 +985,16 @@ async function runDeviationCheck(fromPoll = false) {
     notifyFocusCheckComplete(activeTaskId, task.title, result, nextCheckAt)
   } catch (error) {
     if (fromPoll) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (message.includes('Ollama') || message.includes('Empty')) {
-        console.warn('Deviation poll skipped:', message)
+      const err = error instanceof Error ? error : new Error(String(error))
+      if (isOllamaFailure(err)) {
+        console.error('Deviation poll failed (Ollama):', err.message)
+        applyOllamaPollFailure(readData(), err)
       } else {
         console.error('Deviation poll error:', error)
+        const minutes = settings.pollIntervalMinutes ?? 5
+        nextCheckAt = scheduleNextCheck(minutes, () => runDeviationCheck(true))
+        persistNextCheckAt(nextCheckAt)
       }
-      const minutes = settings.pollIntervalMinutes ?? 5
-      nextCheckAt = scheduleNextCheck(minutes, () => runDeviationCheck(true))
-      persistNextCheckAt(nextCheckAt)
     } else {
       throw error
     }
@@ -737,8 +1024,16 @@ function startDeviationPolling(runImmediately = false) {
   enableBackgroundMonitoring()
   updateTrayForMonitoring(true, settings.pollIntervalMinutes)
 
+  if (isOllamaPaused(settings)) {
+    const pausedUntil = settings.ollamaPausedUntil as number
+    scheduleCheckAt(pausedUntil, () => runDeviationCheck(true))
+    persistNextCheckAt(pausedUntil)
+    broadcastMonitoringState(pausedUntil)
+    return
+  }
+
   if (runImmediately) {
-    runDeviationCheck(true)
+    void runDeviationCheck(true)
     return
   }
 
@@ -747,7 +1042,7 @@ function startDeviationPolling(runImmediately = false) {
     scheduleCheckAt(existingNext, () => runDeviationCheck(true))
     broadcastMonitoringState(existingNext)
   } else {
-    runDeviationCheck(true)
+    void runDeviationCheck(true)
   }
 }
 
@@ -771,23 +1066,25 @@ function setupIpcHandlers() {
 
   ipcMain.handle('get-tasks', async () => {
     const data = readData()
-    return data.tasks || []
+    return (data.tasks || []).map((task: TaskWithWorkspaces) => normalizeTaskWorkspaces(task))
   })
 
   ipcMain.handle('create-task', async (_: any, task: any) => {
     const { v4: uuidv4 } = await import('uuid')
     const id = uuidv4()
 
-    const newTask = {
+    const newTask = normalizeTaskWorkspaces({
       id,
       ...task,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
-    }
+    })
 
     const data = readData()
     data.tasks.push(newTask)
     writeData(data)
+
+    void scheduleTaskEstimateAfterCreate(id)
 
     return newTask
   })
@@ -809,11 +1106,10 @@ function setupIpcHandlers() {
         }
       }
 
-      data.tasks[taskIndex] = {
-        ...data.tasks[taskIndex],
-        ...nextUpdates,
-        updated_at: new Date().toISOString()
-      }
+      data.tasks[taskIndex] = mergeTaskUpdate(
+        data.tasks[taskIndex] as TaskWithWorkspaces,
+        { ...nextUpdates, updated_at: new Date().toISOString() }
+      )
       writeData(data)
       return data.tasks[taskIndex]
     }
@@ -843,24 +1139,19 @@ function setupIpcHandlers() {
 
     const taskIndex = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
     if (taskIndex !== -1) {
-      const row = data.tasks[taskIndex]
-      const patches: Record<string, unknown> = { ...row }
-
+      let row = normalizeTaskWorkspaces(data.tasks[taskIndex] as TaskWithWorkspaces)
       if (!row.drive_work_started_at) {
-        patches.drive_work_started_at = new Date().toISOString()
+        row = { ...row, drive_work_started_at: new Date().toISOString() }
       }
 
-      if (row.workplace_folder) {
-        const index = indexTaskWorkplace(
-          row as WorkplaceTaskRecord,
-          getWorkplaceSettingsFromData(data)
-        )
+      if (getActiveWorkplacePath(row)) {
+        const index = indexTaskWorkplace(row as WorkplaceTaskRecord, getWorkplaceSettingsFromData(data))
         if (index) {
-          patches.workplace_index = index
+          row = mergeTaskUpdate(row, { workplace_index: index })
         }
       }
 
-      data.tasks[taskIndex] = patches
+      data.tasks[taskIndex] = row
     }
 
     data.settings = {
@@ -878,7 +1169,7 @@ function setupIpcHandlers() {
 
   ipcMain.handle('pause-task-work', async (_: any, taskId: string) => {
     const data = readData()
-    const { tasks, task } = pauseTaskWork(data.tasks || [], taskId, 'user')
+    const { tasks, task } = pauseTaskWork(data.tasks || [], taskId, 'break')
     data.tasks = tasks
     data.settings = { ...data.settings, timeTrackingPaused: true }
     writeData(data)
@@ -940,6 +1231,9 @@ function setupIpcHandlers() {
   })
 
   ipcMain.handle('check-deviation-from-screen', async (_: any, taskId: string) => {
+    if (appIsQuitting) {
+      throw new Error('App is closing — screen check cancelled')
+    }
     const data = readData()
     const task = data.tasks.find((t: any) => t.id === taskId)
     if (!task) throw new Error('Task not found')
@@ -951,16 +1245,36 @@ function setupIpcHandlers() {
       )
     }
 
+    const health = await checkOllamaHealth()
+    if (!health.online) {
+      throw new Error('Ollama is offline — start it with: ollama serve')
+    }
+    if (!health.modelAvailable) {
+      throw new Error(`Model "${health.model}" is not loaded — run: ollama run ${health.model}`)
+    }
+
+    const wasPaused = isOllamaPaused(data.settings)
+
     const result = await checkDeviationFromScreen(
       getOllamaModel(),
       taskFocusContext(task),
       true,
-      focusCheckOptionsForTask(task, data.settings)
+      {
+        ...focusCheckOptionsForTask(task, data.settings),
+        showErrorDialog: true
+      }
     )
 
     data.settings = { ...data.settings, activeTaskId: taskId }
     const threshold = data.settings?.deviationThreshold ?? 0.7
     persistFocusCheckResult(data, taskId, result, threshold)
+
+    const afterSuccess = readData()
+    afterSuccess.settings = clearOllamaFailure(afterSuccess.settings || {})
+    writeData(afterSuccess)
+    if (wasPaused) {
+      sendNotification({ type: 'ollama_recovered', data: { model: getOllamaModel() } })
+    }
     notifyFocusCheckComplete(taskId, task.title, result, data.settings?.nextCheckAt ?? null)
 
     if (result.similarity < threshold || !result.onTask) {
@@ -997,47 +1311,36 @@ function setupIpcHandlers() {
   })
 
   ipcMain.handle('estimate-time', async (_: any, task: any) => {
-    try {
-      const subtasksText = task.subtasks?.map((st: any) => st.description).join(', ') || 'none'
+    const data = readData()
+    const stored = data.tasks.find((t: { id: string }) => t.id === task.id) ?? task
+    const merged = { ...stored, ...task }
+    return estimateTaskMinutes(getOllamaModel(), merged, data.settings || {})
+  })
 
-      const prompt = `Estimate time in minutes for this task:
-${formatPlannedTask(taskFocusContext(task))}
-Subtasks: ${subtasksText}
-Respond with JSON: {"total_minutes": number, "confidence": 0-1, "breakdown": {}}`
+  ipcMain.handle('estimate-subtask-time', async (_: any, taskId: string, subtaskId: string) => {
+    const data = readData()
+    const task = data.tasks.find((t: { id: string }) => t.id === taskId)
+    if (!task) throw new Error('Task not found')
+    const subtask = (task.subtasks ?? []).find((s: { id: string }) => s.id === subtaskId)
+    if (!subtask) throw new Error('Subtask not found')
 
-      const response = await axios.post(
-        OLLAMA_API_URL,
-        {
-          model: getOllamaModel(),
-          prompt,
-          stream: false,
-          format: 'json'
-        },
-        { timeout: 30000 }
-      )
+    const result = await estimateSubtaskMinutes(
+      getOllamaModel(),
+      task,
+      subtask,
+      data.settings || {}
+    )
 
-      const result = JSON.parse(response.data.response)
-      const data = readData()
-      const raw = result.total_minutes ?? 60
-      const calibrated = applyCalibration(raw, data.settings || {})
-
-      return {
-        estimate: calibrated,
-        rawEstimate: raw,
-        calibrationFactor: data.settings?.estimate_calibration_factor ?? 1,
-        confidence: result.confidence,
-        breakdown: result.breakdown
-      }
-    } catch (error: any) {
-      console.error('Time estimation error:', error)
-      return {
-        estimate: 60,
-        rawEstimate: 60,
-        calibrationFactor: 1,
-        confidence: 0.5,
-        breakdown: {}
-      }
+    const idx = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
+    const subIdx = (data.tasks[idx].subtasks ?? []).findIndex((s: { id: string }) => s.id === subtaskId)
+    if (idx !== -1 && subIdx !== -1) {
+      const subtasks = [...(data.tasks[idx].subtasks ?? [])]
+      subtasks[subIdx] = { ...subtasks[subIdx], ai_estimate_minutes: result.estimate }
+      data.tasks[idx] = { ...data.tasks[idx], subtasks, updated_at: new Date().toISOString() }
+      writeData(data)
     }
+
+    return result
   })
 
   ipcMain.handle('suggest-communication', async (_: any, text: string, context: string) => {
@@ -1128,16 +1431,78 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
     return { path: result.filePaths[0] }
   })
 
+  ipcMain.handle('semantic-sorter-pick-folder', async () => {
+    const win =
+      mainWindow && !mainWindow.isDestroyed()
+        ? mainWindow
+        : BrowserWindow.getFocusedWindow() ?? undefined
+    const result = await dialog.showOpenDialog(win, {
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (result.canceled || !result.filePaths[0]) {
+      return { path: null as string | null }
+    }
+    return { path: result.filePaths[0] }
+  })
+
+  ipcMain.handle('semantic-sorter-dry-run', async () => {
+    const data = readData()
+    const sorterSettings = getSemanticSorterSettingsFromData(data.settings)
+    return runSemanticSorterDryRun(getOllamaModel(), sorterSettings)
+  })
+
+  ipcMain.handle(
+    'semantic-sorter-apply',
+    async (_: unknown, decisions: import('./semanticSorter/semanticSorterTypes').SorterDecision[]) => {
+      if (!Array.isArray(decisions) || decisions.length === 0) {
+        throw new Error('No decisions to apply')
+      }
+      return applySemanticSorterMoves(decisions)
+    }
+  )
+
+  ipcMain.handle(
+    'semantic-sorter-save-feedback',
+    async (
+      _: unknown,
+      record: import('./semanticSorter/semanticSorterTypes').SemanticSorterFeedbackRecord
+    ) => {
+      saveSemanticSorterFeedback(record)
+      return { success: true }
+    }
+  )
+
+  ipcMain.handle('semantic-sorter-get-settings', async () => {
+    const data = readData()
+    return getSemanticSorterSettingsFromData(data.settings)
+  })
+
+  ipcMain.handle('semantic-sorter-update-settings', async (_: unknown, partial: Record<string, unknown>) => {
+    const data = readData()
+    data.settings = {
+      ...data.settings,
+      semanticSorter: {
+        ...getSemanticSorterSettingsFromData(data.settings),
+        ...partial
+      }
+    }
+    writeData(data)
+    return getSemanticSorterSettingsFromData(data.settings)
+  })
+
   ipcMain.handle('index-workplace', async (_: any, taskId: string) => {
     const data = readData()
     const taskIndex = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
     if (taskIndex === -1) throw new Error('Task not found')
 
-    const task = data.tasks[taskIndex] as WorkplaceTaskRecord
-    const index = indexTaskWorkplace(task, getWorkplaceSettingsFromData(data))
+    const task = normalizeTaskWorkspaces(data.tasks[taskIndex] as TaskWithWorkspaces)
+    const index = indexTaskWorkplace(task as WorkplaceTaskRecord, getWorkplaceSettingsFromData(data))
     if (!index) throw new Error('No valid workplace folder on this task')
 
-    data.tasks[taskIndex] = { ...task, workplace_index: index, updated_at: new Date().toISOString() }
+    data.tasks[taskIndex] = mergeTaskUpdate(task, {
+      workplace_index: index,
+      updated_at: new Date().toISOString()
+    })
     writeData(data)
     return index
   })
@@ -1158,8 +1523,8 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
       const taskIndex = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
       if (taskIndex === -1) throw new Error('Task not found')
 
-      const task = data.tasks[taskIndex] as WorkplaceTaskRecord
-      if (!task.workplace_folder?.trim()) {
+      const task = normalizeTaskWorkspaces(data.tasks[taskIndex] as TaskWithWorkspaces)
+      if (!getActiveWorkplacePath(task)) {
         throw new Error('No workplace folder set on this task')
       }
 
@@ -1171,21 +1536,131 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
         suggestion: data.settings?.lastFocusNote || ''
       }
 
-      const guidance = await runDeviationRecovery(getOllamaModel(), task, deviation, {
+      const guidance = await runDeviationRecovery(getOllamaModel(), task as WorkplaceTaskRecord, deviation, {
         settings: getWorkplaceSettingsFromData(data),
         forceRefresh: !!forceRefresh
       })
 
       if (guidance) {
-        data.tasks[taskIndex] = {
-          ...task,
+        data.tasks[taskIndex] = mergeTaskUpdate(task, {
           workplace_guidance: guidance,
           updated_at: new Date().toISOString()
-        }
+        })
         writeData(data)
       }
 
       return guidance
+    }
+  )
+
+  ipcMain.handle('index-worktree-files', async (_: any, taskId: string) => {
+    const data = readData()
+    const taskIndex = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
+    if (taskIndex === -1) throw new Error('Task not found')
+
+    const task = normalizeTaskWorkspaces(data.tasks[taskIndex] as TaskWithWorkspaces)
+    const workplacePath = getActiveWorkplacePath(task)
+    if (!workplacePath) {
+      throw new Error('No workplace folder set on this task')
+    }
+
+    const wpSettings = getWorkplaceSettingsFromData(data)
+    const index = indexReviewWorktree(workplacePath, wpSettings)
+
+    const existingStatuses = (task.review_statuses ?? {}) as Record<string, Record<string, unknown>>
+    const merged: Record<string, Record<string, unknown>> = { ...existingStatuses }
+
+    for (const file of index.files) {
+      const prev = merged[file.path] as Record<string, unknown> | undefined
+      merged[file.path] = {
+        filePath: file.path,
+        reviewed: prev?.reviewed === true,
+        reviewedAt: prev?.reviewedAt,
+        scheduledDate: prev?.scheduledDate,
+        hidden: prev?.hidden,
+        notes: prev?.notes,
+        metadata: {
+          size: file.size,
+          extension: file.extension,
+          lastModified: file.lastModified
+        }
+      }
+    }
+
+    data.tasks[taskIndex] = mergeTaskUpdate(task, {
+      review_statuses: merged as TaskWithWorkspaces['review_statuses'],
+      updated_at: new Date().toISOString()
+    })
+    writeData(data)
+
+    return {
+      files: index.files,
+      totalFiles: index.totalFiles,
+      indexedAt: index.indexedAt,
+      review_statuses: merged,
+      errors: index.errors
+    }
+  })
+
+  ipcMain.handle(
+    'generate-review-schedule',
+    async (_: unknown, taskId: string, daysAvailable: number) => {
+      const data = readData()
+      const taskIndex = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
+      if (taskIndex === -1) throw new Error('Task not found')
+
+      const task = normalizeTaskWorkspaces(data.tasks[taskIndex] as TaskWithWorkspaces)
+      const workplacePath = getActiveWorkplacePath(task)
+      if (!workplacePath) {
+        throw new Error('No workplace folder set on this task')
+      }
+
+      const wpSettings = getWorkplaceSettingsFromData(data)
+      const index = indexReviewWorktree(workplacePath, wpSettings)
+      const schedule = await generateReviewSchedule(
+        getOllamaModel(),
+        index.files,
+        daysAvailable,
+        data.settings
+      )
+
+      const existingStatuses = (task.review_statuses ?? {}) as Record<string, Record<string, unknown>>
+      const review_statuses = applyScheduleToStatuses(existingStatuses, schedule)
+
+      data.tasks[taskIndex] = mergeTaskUpdate(task, {
+        review_schedule: schedule,
+        review_statuses: review_statuses as TaskWithWorkspaces['review_statuses'],
+        updated_at: new Date().toISOString()
+      })
+      writeData(data)
+
+      return { schedule, review_statuses }
+    }
+  )
+
+  ipcMain.handle(
+    'allocate-offline-time',
+    async (
+      _: unknown,
+      taskId: string,
+      payload: { offlineStartIso: string; breakMinutes: number; workMinutes: number }
+    ) => {
+      const data = readData()
+      const { tasks, task } = allocateTaskOfflineTime(
+        data.tasks || [],
+        taskId,
+        payload.offlineStartIso,
+        payload.workMinutes
+      )
+      data.tasks = tasks
+      if (data.settings?.pendingOfflineCheck) {
+        const nextSettings = { ...data.settings }
+        delete nextSettings.pendingOfflineCheck
+        data.settings = nextSettings
+      }
+      writeData(data)
+      notifyTimeTrackingUpdate(taskId)
+      return task
     }
   )
 
@@ -1302,6 +1777,7 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
     const data = readData()
     return {
       ollamaModel: DEFAULT_OLLAMA_MODEL,
+      ollamaNumPredict: DEFAULT_OLLAMA_NUM_PREDICT,
       deviationThreshold: 0.7,
       pollIntervalMinutes: 5,
       activeTaskId: null,
@@ -1554,7 +2030,11 @@ Respond with JSON: {"activity": "...", "label": "...", "recommendation": "..."}`
       const comparison = await compareTaskToActivity(
         getOllamaModel(),
         taskFocusContext(task),
-        analysis.activity
+        analysis.activity,
+        {
+          numPredict: getOllamaNumPredict(data.settings, 'text'),
+          showErrorDialog: true
+        }
       )
       const deviationScore = 1 - comparison.similarity
 
@@ -1591,9 +2071,196 @@ Respond with JSON: {"activity": "...", "label": "...", "recommendation": "..."}`
   })
 }
 
+async function checkOllamaAvailability(): Promise<boolean> {
+  try {
+    const response = await axios.get(OLLAMA_TAGS_URL, { timeout: 3000 })
+    return response.status === 200
+  } catch {
+    return false
+  }
+}
+
+async function waitForOllama(model: string): Promise<void> {
+  const command = `ollama run ${model}`
+  let dialogWindow: BrowserWindow | null = null
+  let checkInterval: NodeJS.Timeout | null = null
+  let isResolved = false
+
+  return new Promise((resolve) => {
+    // Create a simple dialog window
+    dialogWindow = new BrowserWindow({
+      width: 600,
+      height: 400,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      alwaysOnTop: true,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true
+      }
+    })
+
+    // Load HTML content directly
+    dialogWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <style>
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+              padding: 40px;
+              margin: 0;
+              background: #f5f5f5;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              justify-content: center;
+              height: 100vh;
+            }
+            .container {
+              background: white;
+              padding: 30px;
+              border-radius: 12px;
+              box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+              max-width: 500px;
+            }
+            h1 {
+              color: #d32f2f;
+              margin: 0 0 20px 0;
+              font-size: 24px;
+            }
+            p {
+              color: #333;
+              line-height: 1.6;
+              margin: 0 0 20px 0;
+            }
+            .command-box {
+              background: #f5f5f5;
+              border: 1px solid #ddd;
+              border-radius: 6px;
+              padding: 15px;
+              font-family: 'Monaco', 'Courier New', monospace;
+              font-size: 14px;
+              margin: 20px 0;
+              position: relative;
+              word-break: break-all;
+            }
+            .copy-btn {
+              background: #1976d2;
+              color: white;
+              border: none;
+              padding: 10px 20px;
+              border-radius: 6px;
+              cursor: pointer;
+              font-size: 14px;
+              margin-top: 10px;
+              width: 100%;
+            }
+            .copy-btn:hover {
+              background: #1565c0;
+            }
+            .copy-btn:active {
+              background: #0d47a1;
+            }
+            .status {
+              margin-top: 20px;
+              padding: 10px;
+              background: #fff3cd;
+              border: 1px solid #ffc107;
+              border-radius: 6px;
+              color: #856404;
+              text-align: center;
+            }
+            .checking {
+              animation: pulse 1.5s ease-in-out infinite;
+            }
+            @keyframes pulse {
+              0%, 100% { opacity: 1; }
+              50% { opacity: 0.5; }
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>⚠️ Ollama Not Running</h1>
+            <p>Task Assistant requires Ollama to be running with the <strong>${model}</strong> model.</p>
+            <p>Please run this command in your terminal:</p>
+            <div class="command-box" id="command">${command}</div>
+            <button class="copy-btn" onclick="copyCommand()">📋 Copy Command</button>
+            <div class="status checking" id="status">
+              🔄 Checking for Ollama connection...
+            </div>
+          </div>
+          <script>
+            function copyCommand() {
+              navigator.clipboard.writeText('${command}').then(() => {
+                const btn = document.querySelector('.copy-btn');
+                const originalText = btn.textContent;
+                btn.textContent = '✓ Copied!';
+                btn.style.background = '#4caf50';
+                setTimeout(() => {
+                  btn.textContent = originalText;
+                  btn.style.background = '#1976d2';
+                }, 2000);
+              });
+            }
+          </script>
+        </body>
+      </html>
+    `)}`)
+
+    dialogWindow.on('closed', () => {
+      if (checkInterval) clearInterval(checkInterval)
+      if (!isResolved) {
+        isResolved = true
+        app.quit()
+      }
+    })
+
+    // Poll for Ollama availability every 2 seconds
+    checkInterval = setInterval(async () => {
+      const available = await checkOllamaAvailability()
+      if (available && !isResolved) {
+        isResolved = true
+        if (checkInterval) clearInterval(checkInterval)
+        if (dialogWindow && !dialogWindow.isDestroyed()) {
+          dialogWindow.close()
+        }
+        resolve()
+      }
+    }, 2000)
+
+    // Initial check
+    checkOllamaAvailability().then((available) => {
+      if (available && !isResolved) {
+        isResolved = true
+        if (checkInterval) clearInterval(checkInterval)
+        if (dialogWindow && !dialogWindow.isDestroyed()) {
+          dialogWindow.close()
+        }
+        resolve()
+      }
+    })
+  })
+}
+
 app.whenReady().then(async () => {
   initDataStorage()
   migratePersistedData()
+
+  const visionBudget = computeVisionBudget()
+  console.log(
+    `[vision] budget at startup: max ${visionBudget.maxImagesInBudget} image(s) at ${visionBudget.maxWidth}x${visionBudget.maxHeight}, ~${Math.round(visionBudget.estimatedBytesPerImage / 1024)}KB/image, two=${visionBudget.twoImagesPossible}`
+  )
+  
+  // Check Ollama availability early and wait if needed
+  const ollamaAvailable = await checkOllamaAvailability()
+  if (!ollamaAvailable) {
+    const model = getOllamaModel()
+    await waitForOllama(model)
+  }
+  
   await initNativeNotifications()
 
   initFeatureKernel({
@@ -1664,7 +2331,26 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
+  appIsQuitting = true
+  stopDeviationPolling()
   const data = readData()
+  const runningId = findRunningTaskId(data.tasks || [])
+  if (runningId) {
+    const { tasks, task } = pauseTaskWork(data.tasks || [], runningId, 'break')
+    data.tasks = tasks
+    const sessions = (task.work_sessions ?? []) as Array<{ ended_at?: string | null }>
+    const lastEnded = [...sessions].reverse().find((s) => s.ended_at)?.ended_at
+    if (lastEnded) {
+      data.settings = {
+        ...data.settings,
+        pendingOfflineCheck: {
+          taskId: runningId,
+          taskTitle: String(task.title ?? 'Task'),
+          sessionEndedAt: lastEnded
+        }
+      }
+    }
+  }
   data.tasks = checkpointAllTasks(data.tasks || [])
   writeData(data)
 })

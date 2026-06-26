@@ -1,41 +1,8 @@
 import fs from 'fs'
-import { nativeImage } from 'electron'
 import { ollamaGenerate, parseJsonResponse } from '../ollamaClient'
 import { formatPlannedTask } from '../activityAnalysis'
 import type { DeviationResult } from '../activityAnalysis'
-
-const VISION_MAX_WIDTH = 1280
-
-function prepareVisionBase64(pngBuffer: Buffer): string | null {
-  try {
-    const image = nativeImage.createFromBuffer(pngBuffer)
-    if (image.isEmpty()) return null
-
-    const { width, height } = image.getSize()
-    if (width <= VISION_MAX_WIDTH) {
-      return pngBuffer.toString('base64')
-    }
-
-    const scale = VISION_MAX_WIDTH / width
-    const resized = image.resize({
-      width: VISION_MAX_WIDTH,
-      height: Math.max(1, Math.round(height * scale)),
-      quality: 'good'
-    })
-    return resized.toPNG().toString('base64')
-  } catch {
-    return null
-  }
-}
-
-function loadImageBase64(imagePath: string | undefined): string | null {
-  if (!imagePath || !fs.existsSync(imagePath)) return null
-  try {
-    return prepareVisionBase64(fs.readFileSync(imagePath))
-  } catch {
-    return null
-  }
-}
+import { logVisionPayloadStats, planVisionPayload } from '../visionPayload'
 
 export interface WorkplaceGuidance {
   generated_at: string
@@ -58,7 +25,7 @@ function formatMilestoneNotes(
   if (!updates?.length) return ''
   const recent = [...updates]
     .sort((a, b) => b.prime - a.prime)
-    .slice(0, 5)
+    .slice(0, 3)
     .map((u) => `${u.prime}%: ${u.note || 'confirmed'}`)
     .join('; ')
   return `\nRecent progress check-ins: ${recent}`
@@ -98,6 +65,15 @@ function normalizeGuidance(parsed: Record<string, unknown>): Omit<WorkplaceGuida
   }
 }
 
+function loadImageBuffer(imagePath: string | undefined): Buffer | null {
+  if (!imagePath || !fs.existsSync(imagePath)) return null
+  try {
+    return fs.readFileSync(imagePath)
+  } catch {
+    return null
+  }
+}
+
 export async function runDeviationRecoveryVision(
   model: string,
   task: RecoveryTaskContext,
@@ -114,9 +90,30 @@ export async function runDeviationRecoveryVision(
     task.progress_percent != null ? `\nProgress: ${task.progress_percent}%` : ''
   const milestones = formatMilestoneNotes(task.progress_milestone_updates)
 
-  const refNote = lastOnTaskImagePath
-    ? 'Image 1 is the LAST time you were on-task. Image 2 is the CURRENT off-task screen.'
-    : 'No reference on-task screenshot yet — use workplace files and current screen only.'
+  const currentBuf = loadImageBuffer(deviation.imagePath)
+  const refBuf = loadImageBuffer(lastOnTaskImagePath)
+
+  let visionImages: string[] | undefined
+  let refNote =
+    'No reference on-task screenshot — use workplace files and current screen only.'
+
+  if (currentBuf) {
+    const plan = planVisionPayload({
+      current: currentBuf,
+      reference: refBuf ?? undefined,
+      requestedMax: 2
+    })
+    visionImages = plan.images
+    logVisionPayloadStats(visionImages, 'deviationRecovery')
+
+    if (plan.images.length === 2) {
+      refNote =
+        'Image 1 is the LAST time you were on-task. Image 2 is the CURRENT off-task screen.'
+    } else if (plan.droppedReference) {
+      refNote =
+        'Reference on-task screenshot omitted (vision payload budget) — use workplace files and current screen.'
+    }
+  }
 
   const prompt = `You are a focus coach helping the user return to productive work on their planned task.
 
@@ -128,10 +125,10 @@ Activity label: ${deviation.activityLabel ?? 'unknown'}
 Focus similarity: ${Math.round(deviation.similarity * 100)}%
 
 Workplace folder tree:
-${workplaceTree.slice(0, 8000)}
+${workplaceTree.slice(0, 4000)}
 
 File excerpts from workplace:
-${fileExcerpts.slice(0, 16000) || '(no excerpts)'}
+${fileExcerpts.slice(0, 8000) || '(no excerpts)'}
 
 ${refNote}
 
@@ -140,18 +137,11 @@ Compare what they were doing when on-task vs now. Suggest specific files in the 
 Respond with JSON only:
 {"summary":"one paragraph","suggested_files":[{"path":"relative/path.ts","reason":"why"}],"suggested_actions":["step 1","step 2"],"tools_hint":"optional tool tip"}`
 
-  const images: string[] = []
-  const refB64 = loadImageBase64(lastOnTaskImagePath)
-  const curB64 = loadImageBase64(deviation.imagePath)
-
-  if (refB64) images.push(refB64)
-  if (curB64) images.push(curB64)
-
   const raw = await ollamaGenerate(
     model,
     prompt,
-    images.length > 0 ? images : undefined,
-    { numPredict: 768 }
+    visionImages,
+    { numPredict: 768, showErrorDialog: true }
   )
 
   const parsed = parseJsonResponse<Record<string, unknown>>(raw)

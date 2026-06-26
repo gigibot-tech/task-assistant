@@ -3,6 +3,11 @@ import { v4 as uuidv4 } from 'uuid'
 import type { Task } from '../store/taskStore'
 import PrimeMilestonePrompt from './PrimeMilestonePrompt'
 import {
+  effectiveEstimateMinutes,
+  estimateTaskTime,
+  formatEstimateLabel
+} from '../lib/taskEstimate'
+import {
   clampProgressPercent,
   getNewlyCrossedPrimes,
   getPendingMilestoneQueue,
@@ -21,6 +26,9 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
   const [newItem, setNewItem] = useState('')
   const [milestoneQueue, setMilestoneQueue] = useState<PrimeMilestone[]>([])
   const [draftProgress, setDraftProgress] = useState<number | null>(null)
+  const [estimating, setEstimating] = useState(false)
+  const [estimateError, setEstimateError] = useState<string | null>(null)
+  const autoEstimateAttemptedRef = useRef(false)
   const progressBaselineRef = useRef(clampProgressPercent(task.progress_percent ?? 0))
 
   const checklist = task.progress_checklist ?? []
@@ -36,7 +44,30 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
   useEffect(() => {
     progressBaselineRef.current = clampProgressPercent(task.progress_percent ?? 0)
     setDraftProgress(null)
+    autoEstimateAttemptedRef.current = false
+    setEstimateError(null)
   }, [task.id, task.progress_percent])
+
+  const runTaskEstimate = async () => {
+    setEstimating(true)
+    setEstimateError(null)
+    try {
+      const result = await estimateTaskTime(task)
+      await onUpdate({ ai_estimate_minutes: result.estimate })
+    } catch (err) {
+      setEstimateError(err instanceof Error ? err.message : 'Estimate failed')
+    } finally {
+      setEstimating(false)
+    }
+  }
+
+  useEffect(() => {
+    if (autoEstimateAttemptedRef.current) return
+    if (effectiveEstimateMinutes(task) != null) return
+    if (!task.title.trim()) return
+    autoEstimateAttemptedRef.current = true
+    void runTaskEstimate()
+  }, [task.id, task.title, task.ai_estimate_minutes, task.user_estimate_minutes])
 
   const commitProgressChange = async (nextPercent: number) => {
     const before = progressBaselineRef.current
@@ -92,6 +123,7 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
 
   const handleMilestoneSkip = () => {
     if (!activePrime) return
+    // Just remove from queue without acknowledging - it will come back later
     setMilestoneQueue((prev) => prev.slice(1))
   }
 
@@ -239,22 +271,6 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
           )}
         </div>
 
-        <div className="bg-gray-800 rounded-lg p-3 border border-gray-600/80">
-          <label className="text-xs text-gray-500 uppercase tracking-wide">Your estimate (min)</label>
-          <input
-            type="number"
-            min={1}
-            value={task.user_estimate_minutes ?? ''}
-            placeholder="Optional override"
-            onChange={(e) => {
-              const val = parseInt(e.target.value, 10)
-              void onUpdate({
-                user_estimate_minutes: Number.isFinite(val) && val > 0 ? val : undefined
-              })
-            }}
-            className="mt-2 w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm"
-          />
-        </div>
       </div>
 
       {activePrime && (

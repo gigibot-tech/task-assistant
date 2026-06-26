@@ -5,6 +5,7 @@ import {
   getOpenSession,
   getTaskTimeStatus,
   getWorkSessions,
+  allocateOfflineWorkTime,
   pauseOpenSessionIfAny,
   pauseWorkSession,
   resumeWorkSession,
@@ -156,4 +157,17 @@ export function migrateLegacyTaskTime(task: TaskRecord): TaskRecord {
 
 export function migrateAllTaskTimes(tasks: TaskRecord[]): TaskRecord[] {
   return reconcileTasksTimeState(tasks.map(migrateLegacyTaskTime))
+}
+
+export function allocateTaskOfflineTime(
+  tasks: TaskRecord[],
+  taskId: string,
+  offlineStartIso: string,
+  workMinutes: number
+): { tasks: TaskRecord[]; task: TaskRecord } {
+  const result = applyTaskUpdate(tasks, taskId, (task) =>
+    allocateOfflineWorkTime(task, offlineStartIso, workMinutes) as TaskRecord
+  )
+  if (!result.task) throw new Error('Task not found')
+  return { tasks: result.tasks, task: result.task }
 }

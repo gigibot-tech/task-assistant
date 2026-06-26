@@ -44,6 +44,7 @@ export interface TaskSubtask {
   created_at: string
   validated_at?: string
   validated_with_real_input?: boolean
+  ai_estimate_minutes?: number
   source: SubtaskSource
   phase?: SoftwarePhase
   extraction_of_subtask_id?: string

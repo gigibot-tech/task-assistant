@@ -5,6 +5,8 @@ export type FeatureId =
   | 'softwarePhases'
   | 'phaseGitSignals'
   | 'phaseBalanceAlerts'
+  | 'semanticSorter'
+  | 'review'
 
 export type FeatureFlags = Record<FeatureId, boolean>
 
@@ -12,7 +14,9 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   subtaskProbe: true,
   softwarePhases: true,
   phaseGitSignals: true,
-  phaseBalanceAlerts: true
+  phaseBalanceAlerts: true,
+  semanticSorter: true,
+  review: true
 }
 
 export type PipelineHook =

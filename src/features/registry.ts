@@ -8,3 +8,11 @@ export function softwarePhasesActive(flags: FeatureFlags): boolean {
 export function subtaskProbeActive(flags: FeatureFlags): boolean {
   return isFeatureEnabled(flags, 'subtaskProbe')
 }
+
+export function semanticSorterActive(flags: FeatureFlags): boolean {
+  return isFeatureEnabled(flags, 'semanticSorter')
+}
+
+export function reviewActive(flags: FeatureFlags): boolean {
+  return isFeatureEnabled(flags, 'review')
+}

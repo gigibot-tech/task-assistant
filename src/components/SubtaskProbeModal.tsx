@@ -6,8 +6,9 @@ import {
   buildOutcome,
   type TaskSubtask
 } from '../lib/subtaskTypes'
-import { recordStuckEvent, runSubtaskProbe, setActiveSubtask } from '../lib/electron-api'
+import { recordStuckEvent, runSubtaskProbe, setActiveSubtask, startOrResumeTaskWork } from '../lib/electron-api'
 import type { Task } from '../store/taskStore'
+import { useTaskStore } from '../store/taskStore'
 
 export interface SubtaskProbeModalProps {
   taskId: string
@@ -27,6 +28,7 @@ export interface SubtaskProbeModalProps {
     work_phase?: SoftwarePhase
   }) => Promise<void>
   onLater: () => void
+  onWorkTimerStarted?: () => void
 }
 
 type Step = 'band' | 'input' | 'result'
@@ -45,12 +47,18 @@ export default function SubtaskProbeModal({
   existingSubtasks = [],
   activeSubtaskId,
   onAccept,
-  onLater
+  onLater,
+  onWorkTimerStarted
 }: SubtaskProbeModalProps) {
+  const { loadTasks, setActiveTask } = useTaskStore()
   const [step, setStep] = useState<Step>(bandRequired(trigger) ? 'band' : 'input')
   const [thinkingBand, setThinkingBand] = useState<ThinkingBand | null>(null)
   const [userLine, setUserLine] = useState('')
+  const [validateUseful, setValidateUseful] = useState(false)
+  const [validateExplainable, setValidateExplainable] = useState(false)
+  const [validateE2e, setValidateE2e] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [probeError, setProbeError] = useState<string | null>(null)
   const [probe, setProbe] = useState<ProbeResult | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [editInput, setEditInput] = useState('')
@@ -75,10 +83,32 @@ export default function SubtaskProbeModal({
   useEffect(() => {
     setStep(bandRequired(trigger) ? 'band' : 'input')
     setThinkingBand(null)
-    setUserLine('')
     setProbe(null)
     setLoading(false)
     setSaving(false)
+    setProbeError(null)
+    
+    // Auto-fill from previous day's saved challenge request if it exists
+    const today = new Date().toISOString().split('T')[0]
+    const challengeRequestKey = `challenge_requested_${taskId}_${today}`
+    const savedRequest = localStorage.getItem(challengeRequestKey)
+    
+    if (savedRequest) {
+      try {
+        const parsed = JSON.parse(savedRequest)
+        // Auto-fill the user line if we have it from a previous attempt
+        if (parsed.userLine) {
+          setUserLine(parsed.userLine)
+        }
+        if (parsed.thinkingBand) {
+          setThinkingBand(parsed.thinkingBand)
+        }
+      } catch (err) {
+        console.error('Failed to parse saved challenge request:', err)
+      }
+    } else {
+      setUserLine('')
+    }
   }, [taskId, trigger, primeDay])
 
   const applyProbeToEdit = (result: ProbeResult) => {
@@ -91,17 +121,47 @@ export default function SubtaskProbeModal({
 
   const handleRunProbe = async () => {
     setLoading(true)
+    setProbeError(null)
     try {
+      // FIRST: Persist that challenge was requested for this day
+      const today = new Date().toISOString().split('T')[0] // YYYY-MM-DD format
+      const challengeRequestKey = `challenge_requested_${taskId}_${today}`
+      
+      // Build validation summary from checkboxes
+      const validations = []
+      if (validateUseful) validations.push('useful')
+      if (validateExplainable) validations.push('explainable')
+      if (validateE2e) validations.push('e2e')
+      const validationLine = validations.length > 0
+        ? `Validating: ${validations.join(', ')}`
+        : undefined
+      
+      // Save to localStorage before running probe
+      localStorage.setItem(challengeRequestKey, JSON.stringify({
+        taskId,
+        taskTitle,
+        requestedAt: new Date().toISOString(),
+        day: taskDay,
+        primeDay,
+        trigger,
+        userLine: validationLine,
+        thinkingBand: thinkingBand ?? undefined,
+        validations
+      }))
+      
+      // THEN: Run the probe logic
       const result = await runSubtaskProbe(taskId, {
         trigger,
-        userLine: userLine.trim() || undefined,
+        userLine: validationLine,
         thinkingBand: thinkingBand ?? undefined
       })
       setProbe(result)
       applyProbeToEdit(result)
       setStep('result')
     } catch (err) {
+      const message = err instanceof Error ? err.message : 'Probe failed'
       console.error('Probe failed:', err)
+      setProbeError(message)
     } finally {
       setLoading(false)
     }
@@ -181,6 +241,17 @@ export default function SubtaskProbeModal({
       }
 
       await onAccept(updates)
+
+      try {
+        const workTask = await startOrResumeTaskWork(taskId)
+        await loadTasks()
+        if (workTask && typeof workTask === 'object' && 'id' in workTask) {
+          setActiveTask(workTask as Task)
+        }
+        onWorkTimerStarted?.()
+      } catch (err) {
+        console.error('Failed to start/resume task after probe:', err)
+      }
     } finally {
       setSaving(false)
     }
@@ -257,29 +328,51 @@ export default function SubtaskProbeModal({
                 Band: {THINKING_BAND_LABELS[thinkingBand]}
               </p>
             )}
-            <label className="block text-sm text-gray-300" htmlFor="probe-user-line">
+            <p className="block text-sm text-gray-300">
               What are you trying to validate right now?
-            </label>
-            <input
-              id="probe-user-line"
-              type="text"
-              value={userLine}
-              onChange={(e) => setUserLine(e.target.value)}
-              placeholder="One line — the hypothesis you want to prove"
-              autoFocus
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-sm text-gray-100 placeholder:text-gray-500 focus:outline-none focus:border-violet-500"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void handleRunProbe()
-              }}
-            />
+            </p>
+            <div className="space-y-2 bg-gray-800/50 border border-gray-700 rounded-lg p-3">
+              <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
+                <input
+                  type="checkbox"
+                  checked={validateUseful}
+                  onChange={(e) => setValidateUseful(e.target.checked)}
+                  className="w-4 h-4"
+                />
+                Useful again?
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
+                <input
+                  type="checkbox"
+                  checked={validateExplainable}
+                  onChange={(e) => setValidateExplainable(e.target.checked)}
+                  className="w-4 h-4"
+                />
+                Explainable simply?
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
+                <input
+                  type="checkbox"
+                  checked={validateE2e}
+                  onChange={(e) => setValidateE2e(e.target.checked)}
+                  className="w-4 h-4"
+                />
+                Works end-to-end?
+              </label>
+            </div>
             <button
               type="button"
               onClick={() => void handleRunProbe()}
-              disabled={loading}
+              disabled={loading || (!validateUseful && !validateExplainable && !validateE2e)}
               className="w-full px-3 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-medium text-white disabled:opacity-50"
             >
               {loading ? 'Probing…' : 'Get AI challenge'}
             </button>
+            {probeError && (
+              <p className="text-xs text-red-300 bg-red-950/50 border border-red-800/60 rounded px-2 py-1.5">
+                {probeError}
+              </p>
+            )}
           </div>
         )}
 

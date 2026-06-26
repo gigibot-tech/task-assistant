@@ -127,7 +127,8 @@ Respond with JSON only:
 }`
 
   try {
-    const raw = await ollamaGenerate(model, prompt, undefined, { numPredict: 768 })
+    // User-initiated action - show error dialog if Ollama fails
+    const raw = await ollamaGenerate(model, prompt, undefined, { numPredict: 768, showErrorDialog: true })
     const parsed = parseJsonResponse<Record<string, unknown>>(raw)
     const suggested = (parsed.suggested_subtask as Record<string, string>) || {}
 

@@ -28,6 +28,11 @@ const TASK_DETAIL_SLOTS: TaskDetailSlot[] = [
     )
   },
   {
+    id: 'taskDrive',
+    order: 15,
+    render: ({ task, onUpdate }) => <TaskDrivePanel task={task} onUpdate={onUpdate} />
+  },
+  {
     id: 'subtaskProbe',
     order: 20,
     gatedBy: 'subtaskProbe',
@@ -42,11 +47,6 @@ const TASK_DETAIL_SLOTS: TaskDetailSlot[] = [
     render: ({ task, flags, onUpdate }) => (
       <PhasePanel task={task} flags={flags} onUpdate={onUpdate} />
     )
-  },
-  {
-    id: 'taskDrive',
-    order: 50,
-    render: ({ task, onUpdate }) => <TaskDrivePanel task={task} onUpdate={onUpdate} />
   }
 ]
 

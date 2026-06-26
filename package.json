@@ -53,7 +53,8 @@
       "output": "release"
     },
     "files": [
-      "out/**/*"
+      "out/**/*",
+      "semantic-sorter/**/*"
     ],
     "extraResources": [
       {

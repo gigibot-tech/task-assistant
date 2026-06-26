@@ -1,13 +1,16 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import TaskList from './components/TaskList'
 import TaskForm from './components/TaskForm'
 import DeviationAlert from './components/DeviationAlert'
 import SettingsPanel from './components/SettingsPanel'
 import TaskProgressPanel from './components/TaskProgressPanel'
+import TaskBreakdownPanel from './components/TaskBreakdownPanel'
 import SubtaskProbeModal from './components/SubtaskProbeModal'
 import SMEValidation from './components/SMEValidation'
 import { ScreenCapture } from './components/ScreenCapture'
 import { TaskAnalytics } from './components/TaskAnalytics'
+import OfflineTimePrompt from './components/OfflineTimePrompt'
+import WorktreeReviewTab from './components/WorktreeReviewTab'
 import { useTaskStore } from './store/taskStore'
 import type { Task } from './store/taskStore'
 import {
@@ -28,14 +31,32 @@ import {
   type TaskTimeStatus
 } from './lib/electron-api'
 import { formatDuration, formatDurationClock } from './lib/timeFormat'
+import { effectiveEstimateMinutes, estimateTaskTime } from './lib/taskEstimate'
+import {
+  markPromptedToday,
+  probePromptKey,
+  wasPromptedToday
+} from './lib/dailyPrompts'
+import {
+  EMPTY_FOCUS_MATCH,
+  focusCheckFromNotification,
+  focusCheckFromSettings
+} from './lib/focusCheckDisplay'
 import type { StuckTrigger } from './lib/subtaskTypes'
 import { useFeatureFlags } from './features/useFeatureFlags'
 import { renderTaskDetailSlots } from './features/manifests'
+import SemanticSorterPanel from './components/SemanticSorterPanel'
+import { semanticSorterActive, reviewActive } from './features/registry'
+import { allocateOfflineTime } from './lib/electron-api'
 
-type ActiveView = 'tasks' | 'analytics' | 'settings' | 'sme' | 'focus'
+type ActiveView = 'tasks' | 'analytics' | 'settings' | 'sme' | 'focus' | 'desktop_sorter' | 'review'
 type TaskFilter = 'all' | 'in_progress' | 'completed'
 
 type OllamaStatus = 'checking' | 'online' | 'offline' | 'model_missing'
+
+function taskHasOpenSession(task: Task): boolean {
+  return (task.work_sessions ?? []).some((s) => !s.ended_at)
+}
 
 const MONITOR_INTERVALS = [1, 3, 5, 10, 15, 30] as const
 
@@ -47,20 +68,24 @@ function App() {
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('all')
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus>('checking')
   const [ollamaModel, setOllamaModel] = useState('gemma4:latest')
+  const [ollamaError, setOllamaError] = useState<string | null>(null)
+  const [ollamaPausedUntil, setOllamaPausedUntil] = useState<number | null>(null)
+  const [ollamaRuntimeError, setOllamaRuntimeError] = useState<{
+    model: string
+    command: string
+    timestamp: number
+  } | null>(null)
   const [monitoringInterval, setMonitoringIntervalState] = useState<number | null>(null)
   const [nextCheckAt, setNextCheckAt] = useState<number | null>(null)
   const [checkInProgress, setCheckInProgress] = useState(false)
   const [countdownLabel, setCountdownLabel] = useState('')
   const [taskTimeStatus, setTaskTimeStatus] = useState<TaskTimeStatus | null>(null)
   const [liveTimeSeconds, setLiveTimeSeconds] = useState(0)
+  const [liveBreakSeconds, setLiveBreakSeconds] = useState(0)
+  const [livePauseSeconds, setLivePauseSeconds] = useState(0)
   const [detectedActivity, setDetectedActivity] = useState('')
   const [lastCheckAt, setLastCheckAt] = useState<string | null>(null)
-  const [focusMatch, setFocusMatch] = useState<{
-    similarity: number | null
-    onTask: boolean | null
-    note: string
-    screenSimilarity?: number | null
-  }>({ similarity: null, onTask: null, note: '' })
+  const [focusMatch, setFocusMatch] = useState(EMPTY_FOCUS_MATCH)
   const [screenPermission, setScreenPermission] = useState<string>('unknown')
   const [permissionMessage, setPermissionMessage] = useState<string | null>(null)
   const [grantingPermission, setGrantingPermission] = useState(false)
@@ -79,6 +104,12 @@ function App() {
     trigger: StuckTrigger
   } | null>(null)
   const [phaseNotice, setPhaseNotice] = useState<string | null>(null)
+  const [offlineTimePrompt, setOfflineTimePrompt] = useState<{
+    taskId: string
+    taskTitle: string
+    offlineMinutes: number
+    sessionStartedAt: string
+  } | null>(null)
 
   const { flags: featureFlags } = useFeatureFlags()
   const [, setPomodoroTick] = useState(0)
@@ -105,12 +136,20 @@ function App() {
     return `${m}:${s.toString().padStart(2, '0')}`
   })()
 
-  const effectiveEstimateMinutes = (task: Task) =>
-    task.user_estimate_minutes ?? task.ai_estimate_minutes ?? task.estimated_minutes ?? null
+  const effectiveEstimate = (task: Task) => effectiveEstimateMinutes(task)
 
   useEffect(() => {
     loadTasks()
   }, [loadTasks])
+
+  useEffect(() => {
+    if (tasks.length === 0 || activeTask) return
+    void getMonitoringStatus().then((status) => {
+      if (!status.activeTaskId) return
+      const task = tasks.find((t) => t.id === status.activeTaskId)
+      if (task) setActiveTask(task)
+    })
+  }, [tasks, activeTask, setActiveTask])
 
   const checkOllama = useCallback(async () => {
     setOllamaStatus('checking')
@@ -123,6 +162,8 @@ function App() {
         setOllamaStatus('model_missing')
       } else {
         setOllamaStatus('online')
+        setOllamaError(null)
+        setOllamaPausedUntil(null)
       }
     } catch {
       setOllamaStatus('offline')
@@ -135,11 +176,30 @@ function App() {
     return () => clearInterval(interval)
   }, [checkOllama])
 
+  // Listen for Ollama runtime errors from main process
+  useEffect(() => {
+    if (!window.electron.onNotification) return
+    
+    window.electron.onNotification((data: any) => {
+      if (data.type === 'ollama-error') {
+        console.log('[renderer] Received Ollama error notification:', data)
+        setOllamaRuntimeError({
+          model: data.model,
+          command: data.command,
+          timestamp: data.timestamp
+        })
+        // Also update the status to show the banner
+        setOllamaStatus('offline')
+      }
+    })
+  }, [])
+
   const refreshTaskTimeStatus = useCallback(async (taskId?: string | null) => {
     const id = taskId ?? selectedTask?.id ?? activeTask?.id
     if (!id) {
       setTaskTimeStatus(null)
       setLiveTimeSeconds(0)
+      setLiveBreakSeconds(0)
       return
     }
     try {
@@ -147,6 +207,8 @@ function App() {
       if (status) {
         setTaskTimeStatus(status)
         setLiveTimeSeconds(status.liveSeconds)
+        setLiveBreakSeconds(status.breakSeconds)
+        setLivePauseSeconds(status.pauseSeconds)
       }
     } catch {
       /* stale main */
@@ -169,21 +231,40 @@ function App() {
     setStuckProbe({ taskId, trigger })
   }, [])
 
-  const applyFocusFromSettings = useCallback((settings: Record<string, unknown>) => {
-    if (typeof settings.currentActivity === 'string') {
-      setDetectedActivity(settings.currentActivity)
+  const applyFocusDisplay = useCallback(
+    (display: ReturnType<typeof focusCheckFromSettings>) => {
+      if (!display) {
+        setDetectedActivity('')
+        setLastCheckAt(null)
+        setFocusMatch(EMPTY_FOCUS_MATCH)
+        return
+      }
+      setDetectedActivity(display.activity)
+      setLastCheckAt(display.checkedAt)
+      setFocusMatch(display.match)
+    },
+    []
+  )
+
+  const applyFocusFromSettings = useCallback(
+    (settings: Record<string, unknown>, forTaskId?: string | null) => {
+      applyFocusDisplay(focusCheckFromSettings(settings, forTaskId))
+    },
+    [applyFocusDisplay]
+  )
+
+  const syncFocusForSelectedTask = useCallback(async () => {
+    if (!selectedTask) {
+      applyFocusDisplay(null)
+      return
     }
-    if (typeof settings.lastActivityDetectedAt === 'string') {
-      setLastCheckAt(settings.lastActivityDetectedAt)
+    try {
+      const settings = await window.electron.getSettings()
+      applyFocusFromSettings(settings, selectedTask.id)
+    } catch {
+      applyFocusDisplay(null)
     }
-    if (typeof settings.lastSimilarity === 'number') {
-      setFocusMatch({
-        similarity: settings.lastSimilarity,
-        onTask: typeof settings.lastOnTask === 'boolean' ? settings.lastOnTask : null,
-        note: typeof settings.lastFocusNote === 'string' ? settings.lastFocusNote : ''
-      })
-    }
-  }, [])
+  }, [selectedTask, applyFocusFromSettings, applyFocusDisplay])
 
   const refreshMonitoringState = useCallback(async () => {
     try {
@@ -202,11 +283,13 @@ function App() {
 
       setNextCheckAt(status.nextCheckAt)
       setCheckInProgress(status.checkInProgress)
-      applyFocusFromSettings(settings)
+      if (selectedTask?.id) {
+        applyFocusFromSettings(settings, selectedTask.id)
+      }
     } catch (err) {
       console.error('Failed to refresh monitoring state:', err)
     }
-  }, [applyFocusFromSettings])
+  }, [applyFocusFromSettings, selectedTask?.id])
 
   const checkScreenPermission = useCallback(async () => {
     const diagnostics = getPreloadDiagnostics()
@@ -252,8 +335,17 @@ function App() {
     if (selectedTask) {
       refreshMonitoringState()
       refreshTaskTimeStatus(selectedTask.id)
+      void syncFocusForSelectedTask()
+    } else {
+      applyFocusDisplay(null)
     }
-  }, [selectedTask, refreshMonitoringState, refreshTaskTimeStatus])
+  }, [
+    selectedTask,
+    refreshMonitoringState,
+    refreshTaskTimeStatus,
+    syncFocusForSelectedTask,
+    applyFocusDisplay
+  ])
 
   useEffect(() => {
     if (!taskTimeStatus?.isRunning) return
@@ -262,6 +354,14 @@ function App() {
     }, 1000)
     return () => clearInterval(tick)
   }, [taskTimeStatus?.isRunning, taskTimeStatus?.taskId])
+
+  useEffect(() => {
+    if (!taskTimeStatus?.isPaused) return
+    const tick = setInterval(() => {
+      setLiveBreakSeconds((s) => s + 1)
+    }, 1000)
+    return () => clearInterval(tick)
+  }, [taskTimeStatus?.isPaused, taskTimeStatus?.taskId])
 
   useEffect(() => {
     const syncInterval = setInterval(() => {
@@ -280,27 +380,36 @@ function App() {
       if (data.type === 'focus_check_complete' || data.type === 'deviation_alert') {
         refreshMonitoringState()
       }
-      if (data.type === 'focus_check_complete' && data.data) {
-        const payload = data.data as {
-          similarity?: number
-          onTask?: boolean
-          suggestion?: string
-          currentActivity?: string
-          screenCaptureSimilarity?: number
+      if (data.type === 'ollama_unavailable' && data.data) {
+        const payload = data.data as { message?: string; pausedUntil?: number }
+        setOllamaStatus('offline')
+        setOllamaError(payload.message ?? 'Ollama unavailable')
+        if (typeof payload.pausedUntil === 'number') {
+          setOllamaPausedUntil(payload.pausedUntil)
+          setNextCheckAt(payload.pausedUntil)
         }
-        if (typeof payload.currentActivity === 'string') {
-          setDetectedActivity(payload.currentActivity)
-        }
-        setLastCheckAt(new Date().toISOString())
-        setFocusMatch({
-          similarity: payload.similarity ?? null,
-          onTask: typeof payload.onTask === 'boolean' ? payload.onTask : null,
-          note: payload.suggestion ?? '',
-          screenSimilarity:
-            typeof payload.screenCaptureSimilarity === 'number'
-              ? payload.screenCaptureSimilarity
-              : null
+        void checkOllama()
+      }
+      if (data.type === 'ollama_recovered') {
+        setOllamaError(null)
+        setOllamaPausedUntil(null)
+        void checkOllama()
+      }
+      if (data.type === 'task_estimate_ready' && data.data) {
+        const payload = data.data as { taskId?: string }
+        void loadTasks().then(async () => {
+          if (!payload.taskId || selectedTask?.id !== payload.taskId) return
+          const tasks = await window.electron.getTasks()
+          const updated = tasks.find((t: Task) => t.id === payload.taskId)
+          if (updated) setSelectedTask(updated)
         })
+      }
+      if (data.type === 'focus_check_complete' && data.data) {
+        const payload = data.data as Record<string, unknown>
+        const display = focusCheckFromNotification(payload, selectedTask?.id ?? null)
+        if (display) {
+          applyFocusDisplay(display)
+        }
       }
       if (data.type === 'monitoring_schedule_updated' && data.data) {
         if (typeof data.data.nextCheckAt === 'number' || data.data.nextCheckAt === null) {
@@ -315,8 +424,12 @@ function App() {
       }
       if (data.type === 'time_tracking_updated' && data.data) {
         const status = data.data as TaskTimeStatus
-        setTaskTimeStatus(status)
-        setLiveTimeSeconds(status.liveSeconds)
+        if (!selectedTask?.id || status.taskId === selectedTask.id) {
+          setTaskTimeStatus(status)
+          setLiveTimeSeconds(status.liveSeconds)
+          setLiveBreakSeconds(status.breakSeconds)
+          setLivePauseSeconds(status.pauseSeconds)
+        }
       }
       if (data.type === 'pomodoro_updated' && data.data) {
         const state = data.data as {
@@ -343,9 +456,19 @@ function App() {
       if (data.type === 'stuck_probe_offer' && data.data) {
         const payload = data.data as { taskId?: string; trigger?: StuckTrigger }
         if (payload.taskId) {
+          const trigger = payload.trigger ?? 'deviation'
+          if (trigger === 'deviation' || trigger === 'stale') {
+            const task = tasks.find((t) => t.id === payload.taskId)
+            if (
+              task &&
+              wasPromptedToday(task.drive_prompt_dates, probePromptKey(trigger))
+            ) {
+              return
+            }
+          }
           setStuckProbe({
             taskId: payload.taskId,
-            trigger: payload.trigger ?? 'deviation'
+            trigger
           })
         }
       }
@@ -353,8 +476,24 @@ function App() {
         const payload = data.data as { message?: string }
         if (payload.message) setPhaseNotice(payload.message)
       }
+      if (data.type === 'offline_time_prompt' && data.data) {
+        const payload = data.data as {
+          taskId?: string
+          taskTitle?: string
+          offlineMinutes?: number
+          sessionStartedAt?: string
+        }
+        if (payload.taskId && payload.taskTitle && payload.offlineMinutes && payload.sessionStartedAt) {
+          setOfflineTimePrompt({
+            taskId: payload.taskId,
+            taskTitle: payload.taskTitle,
+            offlineMinutes: payload.offlineMinutes,
+            sessionStartedAt: payload.sessionStartedAt
+          })
+        }
+      }
     })
-  }, [checkScreenPermission, refreshMonitoringState, refreshPomodoro])
+  }, [checkScreenPermission, refreshMonitoringState, refreshPomodoro, tasks, selectedTask?.id, applyFocusDisplay, checkOllama, loadTasks])
 
   useEffect(() => {
     if (checkInProgress) {
@@ -389,6 +528,21 @@ function App() {
     return true
   })
 
+  const runningTask = useMemo(
+    () => tasks.find((t) => t.work_sessions?.some((s) => !s.ended_at)),
+    [tasks]
+  )
+
+  const quickStartTask = useMemo(() => {
+    if (runningTask) return null
+    return (
+      tasks.find((t) => t.status === 'in_progress') ??
+      (activeTask && activeTask.status !== 'completed' ? activeTask : null) ??
+      tasks.find((t) => t.status === 'pending') ??
+      null
+    )
+  }, [tasks, runningTask, activeTask])
+
   const handleTaskClick = (task: Task) => {
     setSelectedTask(task)
     setAiResult(null)
@@ -403,12 +557,16 @@ function App() {
     }
   }
 
-  const handleStartTask = async () => {
-    if (!selectedTask) return
+  const startTaskById = async (task: Task) => {
+    setSelectedTask(task)
+    setActiveTask(task)
     try {
-      const task = await startTaskWork(selectedTask.id)
-      await syncTaskFromWork(task)
-      await window.electron.setActiveTask(selectedTask.id)
+      const updated =
+        task.status === 'in_progress'
+          ? await resumeTaskWork(task.id)
+          : await startTaskWork(task.id)
+      await syncTaskFromWork(updated)
+      await window.electron.setActiveTask(task.id)
       await refreshPomodoro()
       try {
         await requestScreenPermission()
@@ -419,6 +577,16 @@ function App() {
     } catch (err) {
       setAiResult(err instanceof Error ? err.message : 'Failed to start task')
     }
+  }
+
+  const handleStartTask = async () => {
+    if (!selectedTask) return
+    await startTaskById(selectedTask)
+  }
+
+  const handleQuickStart = async () => {
+    if (!quickStartTask) return
+    await startTaskById(quickStartTask)
   }
 
   const handlePauseTask = async () => {
@@ -437,6 +605,7 @@ function App() {
       const task = await resumeTaskWork(selectedTask.id)
       await syncTaskFromWork(task)
       await window.electron.setActiveTask(selectedTask.id)
+      await refreshPomodoro()
     } catch (err) {
       setAiResult(err instanceof Error ? err.message : 'Failed to resume')
     }
@@ -472,6 +641,8 @@ function App() {
       setNextCheckAt(null)
       setTaskTimeStatus(null)
       setLiveTimeSeconds(task.recorded_seconds ?? 0)
+      setLiveBreakSeconds(0)
+      setLivePauseSeconds(0)
     } catch (err) {
       setAiResult(err instanceof Error ? err.message : 'Failed to complete task')
     }
@@ -587,13 +758,8 @@ function App() {
     try {
       await window.electron.setActiveTask(selectedTask.id)
       const result = await checkDeviationFromScreen(selectedTask.id)
-      setDetectedActivity(result.currentActivity)
-      setLastCheckAt(new Date().toISOString())
-      setFocusMatch({
-        similarity: result.similarity,
-        onTask: result.onTask,
-        note: result.suggestion
-      })
+      const settings = await window.electron.getSettings()
+      applyFocusFromSettings(settings, selectedTask.id)
       const pct = Math.round(result.similarity * 100)
       const status = result.onTask ? 'On task' : 'Off task'
       setAiResult(
@@ -602,31 +768,6 @@ function App() {
     } catch (err) {
       setAiResult(err instanceof Error ? err.message : 'Screenshot check failed')
       await checkScreenPermission()
-    } finally {
-      setAiLoading(null)
-    }
-  }
-
-  const handleEstimateTime = async () => {
-    if (!selectedTask) return
-    setAiLoading('estimate')
-    setAiResult(null)
-    try {
-      const result = await window.electron.estimateTime(selectedTask)
-      await updateTask(selectedTask.id, { ai_estimate_minutes: result.estimate })
-      setSelectedTask({ ...selectedTask, ai_estimate_minutes: result.estimate })
-      const raw = (result as { rawEstimate?: number }).rawEstimate
-      const factor = (result as { calibrationFactor?: number }).calibrationFactor
-      const calNote =
-        raw && factor && factor !== 1
-          ? ` (raw ${raw} min × ${factor.toFixed(2)} calibration)`
-          : ''
-      setAiResult(
-        `AI Estimate: ${result.estimate} minutes${calNote} (${Math.round((result.confidence || 0.5) * 100)}% confidence)`
-      )
-      setStaleNotice(null)
-    } catch (err) {
-      setAiResult(err instanceof Error ? err.message : 'Estimation failed')
     } finally {
       setAiLoading(null)
     }
@@ -662,6 +803,11 @@ function App() {
   }
 
   const getStatusText = () => {
+    if (ollamaError && ollamaStatus !== 'online') {
+      return ollamaPausedUntil
+        ? `Ollama down · retry ${new Date(ollamaPausedUntil).toLocaleTimeString()}`
+        : 'Ollama down'
+    }
     switch (ollamaStatus) {
       case 'online': return `Ollama · ${ollamaModel}`
       case 'offline': return 'Ollama offline'
@@ -679,6 +825,20 @@ function App() {
             <p className="text-sm text-gray-400">AI-powered task management with gemma4:latest</p>
           </div>
           <div className="flex items-center gap-4">
+            {activeView === 'tasks' && quickStartTask && (
+              <button
+                type="button"
+                onClick={handleQuickStart}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-primary-600 hover:bg-primary-700 transition-colors max-w-[220px]"
+                title={`Start: ${quickStartTask.title}`}
+              >
+                <span aria-hidden>▶</span>
+                <span className="truncate">
+                  {quickStartTask.status === 'in_progress' ? 'Resume' : 'Start'}{' '}
+                  {quickStartTask.title}
+                </span>
+              </button>
+            )}
             <button
               onClick={checkOllama}
               className="flex items-center gap-2 px-3 py-2 bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors"
@@ -765,7 +925,17 @@ function App() {
             {selectedTask && (
               <button
                 type="button"
-                onClick={handleEstimateTime}
+                onClick={async () => {
+                  if (!selectedTask) return
+                  try {
+                    const result = await estimateTaskTime(selectedTask)
+                    await updateTask(selectedTask.id, { ai_estimate_minutes: result.estimate })
+                    setSelectedTask({ ...selectedTask, ai_estimate_minutes: result.estimate })
+                    setStaleNotice(null)
+                  } catch {
+                    /* Progress panel shows estimate errors */
+                  }
+                }}
                 className="text-xs px-2 py-1 bg-orange-800 hover:bg-orange-700 rounded"
               >
                 Re-estimate
@@ -781,9 +951,55 @@ function App() {
           </div>
         </div>
       )}
-      {ollamaStatus === 'offline' && (
-        <div className="bg-red-900/50 border-b border-red-700 px-6 py-2 text-sm text-red-200">
-          Ollama is not running. Start it with <code className="bg-red-900 px-1 rounded">ollama serve</code>
+      {(ollamaError || ollamaStatus === 'offline' || ollamaStatus === 'model_missing' || ollamaRuntimeError) && (
+        <div className="bg-red-950/80 border-b border-red-800 px-6 py-2 text-sm text-red-100 flex items-center justify-between gap-3">
+          <span>
+            {ollamaRuntimeError ? (
+              <>
+                ⚠️ Ollama stopped responding during operation. Restart with:{' '}
+                <code className="bg-red-900 px-1 rounded font-mono text-xs">
+                  {ollamaRuntimeError.command}
+                </code>
+              </>
+            ) : (
+              <>
+                {ollamaError ??
+                  (ollamaStatus === 'model_missing'
+                    ? `Model "${ollamaModel}" not loaded — run: ollama run ${ollamaModel}`
+                    : 'Ollama is not running. Start it with: ollama serve')}
+              </>
+            )}
+            {ollamaPausedUntil && (
+              <span className="text-red-300/80">
+                {' '}
+                · screen checks retry {new Date(ollamaPausedUntil).toLocaleTimeString()}
+              </span>
+            )}
+          </span>
+          <div className="flex gap-2 shrink-0">
+            {ollamaRuntimeError && (
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(ollamaRuntimeError.command)
+                }}
+                className="px-2 py-1 text-xs rounded bg-red-900 hover:bg-red-800"
+                title="Copy restart command"
+              >
+                📋 Copy
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setOllamaRuntimeError(null)
+                void checkOllama()
+              }}
+              className="px-2 py-1 text-xs rounded bg-red-900 hover:bg-red-800"
+            >
+              Retry
+            </button>
+          </div>
         </div>
       )}
       {!preloadReady && (
@@ -878,6 +1094,19 @@ function App() {
             <button onClick={() => setActiveView('focus')} className={navButtonClass('focus')}>
               Focus Monitor
             </button>
+            {reviewActive(featureFlags) && (
+              <button onClick={() => setActiveView('review')} className={navButtonClass('review')}>
+                Review
+              </button>
+            )}
+            {semanticSorterActive(featureFlags) && (
+              <button
+                onClick={() => setActiveView('desktop_sorter')}
+                className={navButtonClass('desktop_sorter')}
+              >
+                Desktop Sorter
+              </button>
+            )}
             <button onClick={() => setActiveView('settings')} className={navButtonClass('settings')}>
               Settings
             </button>
@@ -903,13 +1132,48 @@ function App() {
 
         <main className="flex-1 overflow-auto p-6">
           {activeView === 'tasks' && (
-            <TaskList tasks={filteredTasks} onTaskClick={handleTaskClick} />
+            <TaskList
+              tasks={filteredTasks}
+              onTaskClick={handleTaskClick}
+              taskTimeStatus={taskTimeStatus}
+              onPlay={startTaskById}
+              onPause={async (task) => {
+                try {
+                  const updated = await pauseTaskWork(task.id)
+                  await syncTaskFromWork(updated)
+                } catch { /* ignore */ }
+              }}
+              onResume={async (task) => {
+                try {
+                  const updated = await resumeTaskWork(task.id)
+                  await syncTaskFromWork(updated)
+                  await window.electron.setActiveTask(task.id)
+                } catch { /* ignore */ }
+              }}
+            />
           )}
           {activeView === 'analytics' && <TaskAnalytics />}
           {activeView === 'settings' && <SettingsPanel />}
           {activeView === 'sme' && <SMEValidation />}
+          {activeView === 'desktop_sorter' && semanticSorterActive(featureFlags) && (
+            <SemanticSorterPanel />
+          )}
           {activeView === 'focus' && (
             <ScreenCapture selectedTaskId={selectedTask?.id || activeTask?.id} />
+          )}
+          {activeView === 'review' && reviewActive(featureFlags) && selectedTask && (
+            <WorktreeReviewTab
+              task={selectedTask}
+              onTaskUpdated={(updated) => setSelectedTask(updated)}
+            />
+          )}
+          {activeView === 'review' && reviewActive(featureFlags) && !selectedTask && (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-center text-gray-400">
+                <p className="text-lg mb-2">Select a task to review its files</p>
+                <p className="text-sm">Choose a task from the sidebar to get started</p>
+              </div>
+            </div>
           )}
         </main>
 
@@ -950,25 +1214,28 @@ function App() {
               </div>
 
               {(selectedTask.ai_estimate_minutes || selectedTask.user_estimate_minutes) && (
-                <p className="text-sm text-gray-400">
-                  {selectedTask.user_estimate_minutes
-                    ? `Your estimate: ${selectedTask.user_estimate_minutes} min`
-                    : `AI estimate: ${selectedTask.ai_estimate_minutes} min`}
-                  {effectiveEstimateMinutes(selectedTask) != null && (
-                    <>
-                      {' '}
-                      · ~{Math.max(
-                        0,
-                        Math.round(
-                          effectiveEstimateMinutes(selectedTask)! *
-                            (1 - (selectedTask.progress_percent ?? 0) / 100) -
-                            (selectedTask.recorded_seconds ?? 0) / 60
-                        )
-                      )}{' '}
-                      min remaining
-                    </>
-                  )}
-                </p>
+                <div className="flex items-center gap-2 text-sm text-gray-400">
+                  <span className="text-indigo-400">🤖</span>
+                  <span>
+                    {selectedTask.user_estimate_minutes
+                      ? `${selectedTask.user_estimate_minutes} min`
+                      : `~${selectedTask.ai_estimate_minutes} min`}
+                    {effectiveEstimate(selectedTask) != null && (
+                      <>
+                        {' · '}
+                        ~{Math.max(
+                          0,
+                          Math.round(
+                            effectiveEstimate(selectedTask)! *
+                              (1 - (selectedTask.progress_percent ?? 0) / 100) -
+                              (selectedTask.recorded_seconds ?? 0) / 60
+                          )
+                        )}{' '}
+                        left
+                      </>
+                    )}
+                  </span>
+                </div>
               )}
 
               <TaskProgressPanel
@@ -977,6 +1244,15 @@ function App() {
                   const updated = await window.electron.updateTask(selectedTask.id, updates)
                   setSelectedTask(updated)
                   setStaleNotice(null)
+                  await loadTasks()
+                }}
+              />
+
+              <TaskBreakdownPanel
+                task={selectedTask}
+                onUpdate={async (updates: Partial<Task>) => {
+                  const updated = await window.electron.updateTask(selectedTask.id, updates)
+                  setSelectedTask(updated)
                   await loadTasks()
                 }}
               />
@@ -1024,7 +1300,19 @@ function App() {
                       ? liveTimeSeconds
                       : selectedTask.recorded_seconds ?? 0
                   )}{' '}
-                  total · {selectedTask.work_sessions?.length ?? 0} sessions · saved to disk
+                  work ·{' '}
+                  {formatDuration(
+                    taskTimeStatus?.taskId === selectedTask.id
+                      ? liveBreakSeconds
+                      : taskTimeStatus?.breakSeconds ?? 0
+                  )}{' '}
+                  break ·{' '}
+                  {formatDuration(
+                    taskTimeStatus?.taskId === selectedTask.id
+                      ? livePauseSeconds
+                      : taskTimeStatus?.pauseSeconds ?? 0
+                  )}{' '}
+                  paused · {selectedTask.work_sessions?.length ?? 0} sessions
                 </p>
               </div>
 
@@ -1130,15 +1418,14 @@ function App() {
                     )}
                   </div>
                 )}
+                {selectedTask.status === 'in_progress' &&
+                  !detectedActivity &&
+                  focusMatch.similarity === null && (
+                    <p className="text-xs text-gray-600 px-1">
+                      No screen check for this task yet. Use Check now or enable auto capture.
+                    </p>
+                  )}
 
-                <button
-                  type="button"
-                  onClick={handleEstimateTime}
-                  disabled={aiLoading === 'estimate'}
-                  className="w-full px-3 py-2 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 rounded-lg text-sm font-medium"
-                >
-                  {aiLoading === 'estimate' ? 'Estimating...' : 'AI Estimate'}
-                </button>
               </div>
 
               {aiResult && (
@@ -1158,7 +1445,9 @@ function App() {
                 )}
                 {selectedTask.status === 'in_progress' && (
                   <>
-                    {taskTimeStatus?.isRunning ? (
+                    {(taskTimeStatus?.taskId === selectedTask.id
+                      ? taskTimeStatus.isRunning
+                      : taskHasOpenSession(selectedTask)) ? (
                       <button
                         onClick={handlePauseTask}
                         className="w-full px-4 py-2 bg-amber-800 hover:bg-amber-700 rounded-lg font-medium"
@@ -1202,6 +1491,14 @@ function App() {
       <DeviationAlert
         onReturnToTask={handleReturnToTask}
         onStuckProbe={openStuckProbe}
+        onAddSubtask={async (taskId: string, subtask: import('./lib/subtaskTypes').TaskSubtask) => {
+          const task = tasks.find((t) => t.id === taskId)
+          if (!task) return
+          
+          const updatedSubtasks = [...(task.subtasks || []), subtask]
+          await window.electron.updateTask(taskId, { subtasks: updatedSubtasks })
+          await loadTasks()
+        }}
       />
 
       {stuckProbe && (() => {
@@ -1209,6 +1506,19 @@ function App() {
           tasks.find((t) => t.id === stuckProbe.taskId) ??
           (selectedTask?.id === stuckProbe.taskId ? selectedTask : null)
         if (!probeTask) return null
+
+        const snoozeAutoProbe = async () => {
+          const trigger = stuckProbe.trigger
+          if (trigger === 'deviation' || trigger === 'stale') {
+            await updateTask(probeTask.id, {
+              drive_prompt_dates: markPromptedToday(
+                probeTask.drive_prompt_dates,
+                probePromptKey(trigger)
+              )
+            })
+          }
+        }
+
         return (
           <SubtaskProbeModal
             taskId={probeTask.id}
@@ -1216,7 +1526,12 @@ function App() {
             trigger={stuckProbe.trigger}
             existingSubtasks={probeTask.subtasks ?? []}
             activeSubtaskId={probeTask.active_subtask_id}
-            onLater={() => setStuckProbe(null)}
+            onLater={() => {
+              void snoozeAutoProbe().finally(() => setStuckProbe(null))
+            }}
+            onWorkTimerStarted={() => {
+              void refreshTaskTimeStatus(probeTask.id)
+            }}
             onAccept={async (updates) => {
               const patch: Partial<Task> = {
                 subtasks: updates.subtasks,
@@ -1247,6 +1562,7 @@ function App() {
               const updated = await window.electron.updateTask(probeTask.id, patch)
               if (selectedTask?.id === probeTask.id) setSelectedTask(updated)
               await loadTasks()
+              await snoozeAutoProbe()
               setStuckProbe(null)
               setStaleNotice(null)
             }}
@@ -1260,6 +1576,35 @@ function App() {
             <TaskForm editTask={editingTask} onClose={handleCloseForm} />
           </div>
         </div>
+      )}
+
+      {offlineTimePrompt && (
+        <OfflineTimePrompt
+          taskId={offlineTimePrompt.taskId}
+          taskTitle={offlineTimePrompt.taskTitle}
+          offlineMinutes={offlineTimePrompt.offlineMinutes}
+          sessionStartedAt={offlineTimePrompt.sessionStartedAt}
+          onSubmit={async (breakMinutes, workMinutes) => {
+            try {
+              await allocateOfflineTime(offlineTimePrompt.taskId, {
+                offlineStartIso: offlineTimePrompt.sessionStartedAt,
+                breakMinutes,
+                workMinutes
+              })
+              await loadTasks()
+              if (selectedTask?.id === offlineTimePrompt.taskId) {
+                await refreshTaskTimeStatus(offlineTimePrompt.taskId)
+              }
+            } catch (err) {
+              setAiResult(err instanceof Error ? err.message : 'Failed to record offline time')
+            }
+            setOfflineTimePrompt(null)
+          }}
+          onDismiss={() => {
+            console.log('[offline-time] User dismissed prompt')
+            setOfflineTimePrompt(null)
+          }}
+        />
       )}
     </div>
   )

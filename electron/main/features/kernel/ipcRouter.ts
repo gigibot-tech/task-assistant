@@ -1,6 +1,7 @@
 import type { IpcMain } from 'electron'
 import { syncGitPhaseSignals } from '../softwarePhases/gitPhaseSignals'
 import { getPhaseBalance } from '../softwarePhases/phaseTime'
+import { getActiveWorkplacePath, normalizeTaskWorkspaces } from '../../../../src/shared/workplace/workspaces'
 import {
   getFeatureFlagsFromSettings,
   isFeatureEnabled,
@@ -55,8 +56,8 @@ export function registerFeatureIpc(ipcMain: IpcMain, deps: FeatureIpcDeps): void
     const taskIndex = (data.tasks || []).findIndex((t) => t.id === taskId)
     if (taskIndex === -1) throw new Error('Task not found')
 
-    const task = data.tasks![taskIndex]
-    const inference = await syncGitPhaseSignals(task.workplace_folder as string | undefined)
+    const task = normalizeTaskWorkspaces(data.tasks![taskIndex] as Record<string, unknown>)
+    const inference = await syncGitPhaseSignals(getActiveWorkplacePath(task))
     if (!inference) throw new Error('Git sync failed')
 
     const balance = {

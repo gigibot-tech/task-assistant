@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electron', {
-  preloadVersion: 9,
+  preloadVersion: 11,
   getTasks: () => ipcRenderer.invoke('get-tasks'),
   createTask: (task: any) => ipcRenderer.invoke('create-task', task),
   updateTask: (id: string, updates: any) => ipcRenderer.invoke('update-task', id, updates),
@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('electron', {
   checkDeviation: (activity: string, task: string) =>
     ipcRenderer.invoke('check-deviation', activity, task),
   estimateTime: (task: any) => ipcRenderer.invoke('estimate-time', task),
+  estimateSubtaskTime: (taskId: string, subtaskId: string) =>
+    ipcRenderer.invoke('estimate-subtask-time', taskId, subtaskId),
   suggestCommunication: (text: string, context: string) =>
     ipcRenderer.invoke('suggest-communication', text, context),
   validateWithSME: (approach: string, domain: string) =>
@@ -49,6 +51,13 @@ contextBridge.exposeInMainWorld('electron', {
 
   pickWorkplaceFolder: () => ipcRenderer.invoke('pick-workplace-folder'),
   indexWorkplace: (taskId: string) => ipcRenderer.invoke('index-workplace', taskId),
+  indexWorktreeFiles: (taskId: string) => ipcRenderer.invoke('index-worktree-files', taskId),
+  generateReviewSchedule: (taskId: string, daysAvailable: number) =>
+    ipcRenderer.invoke('generate-review-schedule', taskId, daysAvailable),
+  allocateOfflineTime: (
+    taskId: string,
+    payload: { offlineStartIso: string; breakMinutes: number; workMinutes: number }
+  ) => ipcRenderer.invoke('allocate-offline-time', taskId, payload),
   openWorkplacePath: (taskId: string, relativePath: string) =>
     ipcRenderer.invoke('open-workplace-path', taskId, relativePath),
   getWorkplaceGuidance: (taskId: string, forceRefresh?: boolean) =>
@@ -76,6 +85,16 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('set-work-phase', taskId, phase, source ?? 'user'),
   syncPhaseGitSignals: (taskId: string) =>
     ipcRenderer.invoke('sync-phase-git-signals', taskId),
+
+  semanticSorterDryRun: () => ipcRenderer.invoke('semantic-sorter-dry-run'),
+  semanticSorterApply: (decisions: unknown[]) =>
+    ipcRenderer.invoke('semantic-sorter-apply', decisions),
+  semanticSorterSaveFeedback: (record: unknown) =>
+    ipcRenderer.invoke('semantic-sorter-save-feedback', record),
+  semanticSorterPickFolder: () => ipcRenderer.invoke('semantic-sorter-pick-folder'),
+  semanticSorterGetSettings: () => ipcRenderer.invoke('semantic-sorter-get-settings'),
+  semanticSorterUpdateSettings: (partial: unknown) =>
+    ipcRenderer.invoke('semantic-sorter-update-settings', partial),
 
   onNotification: (callback: (data: any) => void) => {
     ipcRenderer.on('notification', (_, data) => callback(data))
@@ -109,6 +128,8 @@ export interface ElectronAPI {
     isPaused: boolean
     recordedSeconds: number
     liveSeconds: number
+    breakSeconds: number
+    pauseSeconds: number
     currentSessionStartedAt: string | null
     sessionCount: number
   } | null>
@@ -140,7 +161,17 @@ export interface ElectronAPI {
   estimateTime: (task: any) => Promise<{
     estimate: number
     confidence: number
-    breakdown: Record<string, number>
+    rawEstimate?: number
+    calibrationFactor?: number
+  }>
+  estimateSubtaskTime: (
+    taskId: string,
+    subtaskId: string
+  ) => Promise<{
+    estimate: number
+    confidence: number
+    rawEstimate?: number
+    calibrationFactor?: number
   }>
   suggestCommunication: (text: string, context: string) => Promise<{
     suggestions: string[]
@@ -198,6 +229,24 @@ export interface ElectronAPI {
     file_count: number
     tree_text: string
   }>
+  indexWorktreeFiles: (taskId: string) => Promise<{
+    files: Array<{ path: string; size: number; extension: string; lastModified?: string }>
+    totalFiles: number
+    indexedAt: string
+    review_statuses?: Record<string, unknown>
+    errors?: string[]
+  }>
+  generateReviewSchedule: (
+    taskId: string,
+    daysAvailable: number
+  ) => Promise<{
+    schedule: Record<string, unknown>
+    review_statuses: Record<string, unknown>
+  }>
+  allocateOfflineTime: (
+    taskId: string,
+    payload: { offlineStartIso: string; breakMinutes: number; workMinutes: number }
+  ) => Promise<Record<string, unknown>>
   openWorkplacePath: (
     taskId: string,
     relativePath: string
@@ -264,6 +313,41 @@ export interface ElectronAPI {
     git_available: boolean
     phase_balance?: Record<string, unknown>
   }>
+  semanticSorterDryRun: () => Promise<{
+    decisions: Array<{
+      source: string
+      category: string
+      confidence: number
+      destination: string
+      reason: string
+      human_category: string
+      human_reason: string
+      semantic_tags: string[]
+      matched_rules: string[]
+      script_category?: string
+      script_confidence?: number
+      script_reason?: string
+      augmented_by_ollama?: boolean
+      destination_relative?: string
+    }>
+    summary: string
+    csvPath: string | null
+  }>
+  semanticSorterApply: (
+    decisions: Array<Record<string, unknown>>
+  ) => Promise<{ moved: number; errors: Array<{ source: string; error: string }> }>
+  semanticSorterSaveFeedback: (record: {
+    created_at: string
+    source: string
+    source_name: string
+    category: string
+    destination: string
+    tags: string[]
+    note: string
+  }) => Promise<{ success: boolean }>
+  semanticSorterPickFolder: () => Promise<{ path: string | null }>
+  semanticSorterGetSettings: () => Promise<Record<string, unknown>>
+  semanticSorterUpdateSettings: (partial: Record<string, unknown>) => Promise<Record<string, unknown>>
   onNotification: (callback: (data: any) => void) => void
 }
 

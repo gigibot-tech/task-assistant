@@ -70,7 +70,8 @@ Only use paths that appear in the tree. Prefer source code, README, and config o
 Respond with JSON only: {"files":["relative/path.ts"]}`
 
   try {
-    const raw = await ollamaGenerate(model, prompt, undefined, { numPredict: 256 })
+    // User-initiated action - show error dialog if Ollama fails
+    const raw = await ollamaGenerate(model, prompt, undefined, { numPredict: 256, showErrorDialog: true })
     const parsed = parseJsonResponse<{ files?: string[] }>(raw)
     const files = Array.isArray(parsed.files) ? parsed.files : []
 

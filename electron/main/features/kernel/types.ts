@@ -16,7 +16,7 @@ export interface KernelDeps {
 }
 
 export interface FeatureModule {
-  id: FeatureId | 'workplace'
+  id: FeatureId | 'workplace' | 'semanticSorter' | 'review'
   order: number
   alwaysOn?: boolean
   hooks?: {

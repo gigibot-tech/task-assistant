@@ -1,20 +1,28 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import type { Task } from '../store/taskStore'
 import TooltipChip from './TooltipChip'
 import SubtaskProbeModal from './SubtaskProbeModal'
+import AspectDailyModal from './AspectDailyModal'
+import {
+  aspectPromptKey,
+  markPromptedToday,
+  primePromptKey
+} from '../lib/dailyPrompts'
 import {
   DRIVE_ASPECTS,
   DRIVE_ASPECT_LABELS,
+  countAspectsAnsweredToday,
   emptyDriveNotes,
   entryHasNote,
   filterCheckinsByWindow,
   formatCheckinRowLabel,
   getAspectPromptQuestion,
   getAspectTooltip,
-  getDuePrimeCheckIn,
+  getDailyAspectQueue,
   getNextPrimeCheckIn,
   getTaskDayIndex,
+  isPrimeProbeDueToday,
   type DriveAspect,
   type DriveReflectionEntry,
   type DriveWindowDays
@@ -28,12 +36,15 @@ interface TaskDrivePanelProps {
 const WINDOW_OPTIONS: DriveWindowDays[] = [7, 14, 30, 90]
 
 export default function TaskDrivePanel({ task, onUpdate }: TaskDrivePanelProps) {
-  const [showModal, setShowModal] = useState(false)
+  const [showProbeModal, setShowProbeModal] = useState(false)
+  const [showAspectModal, setShowAspectModal] = useState(false)
   const [modalPrime, setModalPrime] = useState<number | null>(null)
+  const [dailyAspect, setDailyAspect] = useState<DriveAspect | null>(null)
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [adhocAspect, setAdhocAspect] = useState<DriveAspect | null>(null)
   const [adhocNote, setAdhocNote] = useState('')
   const [historyOpen, setHistoryOpen] = useState(false)
+  const autoPromptedRef = useRef<string | null>(null)
 
   const workStartedAt =
     task.drive_work_started_at ??
@@ -44,9 +55,15 @@ export default function TaskDrivePanel({ task, onUpdate }: TaskDrivePanelProps) 
   const windowDays = (task.drive_window_days ?? 14) as DriveWindowDays
   const checkins = task.drive_checkins ?? []
   const acknowledged = task.drive_acknowledged_primes ?? []
+  const promptDates = task.drive_prompt_dates ?? {}
 
-  const duePrime = getDuePrimeCheckIn(taskDay, acknowledged, checkins)
+  const duePrimeToday = isPrimeProbeDueToday(taskDay, acknowledged, checkins, promptDates)
   const nextPrime = getNextPrimeCheckIn(taskDay, acknowledged, checkins)
+  const dailyAspectQueue = useMemo(
+    () => getDailyAspectQueue(checkins, promptDates),
+    [checkins, promptDates]
+  )
+  const aspectsAnsweredToday = countAspectsAnsweredToday(checkins)
 
   const filteredHistory = useMemo(
     () => filterCheckinsByWindow(checkins, windowDays),
@@ -56,11 +73,48 @@ export default function TaskDrivePanel({ task, onUpdate }: TaskDrivePanelProps) 
   const selectedEntry = filteredHistory.find((e) => e.id === selectedEntryId) ?? null
 
   useEffect(() => {
-    if (duePrime != null && task.status === 'in_progress') {
-      setModalPrime(duePrime)
-      setShowModal(true)
+    autoPromptedRef.current = null
+  }, [task.id])
+
+  useEffect(() => {
+    if (task.status !== 'in_progress') return
+    if (showProbeModal || showAspectModal) return
+
+    const autoKey =
+      duePrimeToday != null
+        ? `prime:${duePrimeToday}`
+        : dailyAspectQueue[0]
+          ? `aspect:${dailyAspectQueue[0]}`
+          : null
+
+    if (!autoKey || autoPromptedRef.current === autoKey) return
+    autoPromptedRef.current = autoKey
+
+    if (duePrimeToday != null) {
+      setModalPrime(duePrimeToday)
+      setShowProbeModal(true)
+      return
     }
-  }, [task.id, duePrime, task.status])
+
+    const aspect = dailyAspectQueue[0]
+    if (aspect) {
+      setDailyAspect(aspect)
+      setShowAspectModal(true)
+    }
+  }, [
+    task.status,
+    duePrimeToday,
+    dailyAspectQueue,
+    showProbeModal,
+    showAspectModal,
+    task.id
+  ])
+
+  const snoozePrompt = async (key: string) => {
+    await onUpdate({
+      drive_prompt_dates: markPromptedToday(promptDates, key)
+    })
+  }
 
   const savePrimeProbe = async (updates: {
     subtasks: import('../lib/subtaskTypes').TaskSubtask[]
@@ -77,19 +131,62 @@ export default function TaskDrivePanel({ task, onUpdate }: TaskDrivePanelProps) 
       ])
     ].sort((a, b) => a - b)
 
+    const nextDates = markPromptedToday(promptDates, primePromptKey(modalPrime))
+
     await onUpdate({
       subtasks: updates.subtasks,
       active_subtask_id: updates.active_subtask_id,
       probe_must_code_by: updates.probe_must_code_by,
-      drive_acknowledged_primes: nextAck
+      drive_acknowledged_primes: nextAck,
+      drive_prompt_dates: nextDates
     })
 
-    setShowModal(false)
+    setShowProbeModal(false)
     setModalPrime(null)
   }
 
-  const handleLater = () => {
-    setShowModal(false)
+  const handleProbeLater = async () => {
+    if (modalPrime != null) {
+      await snoozePrompt(primePromptKey(modalPrime))
+    }
+    setShowProbeModal(false)
+    setModalPrime(null)
+    autoPromptedRef.current = null
+  }
+
+  const handleAspectLater = async () => {
+    if (dailyAspect) {
+      await snoozePrompt(aspectPromptKey(dailyAspect))
+    }
+    setShowAspectModal(false)
+    setDailyAspect(null)
+    autoPromptedRef.current = null
+  }
+
+  const saveAspectNote = async (aspect: DriveAspect, note: string) => {
+    const notes = emptyDriveNotes()
+    notes[aspect] = note
+
+    const entry: DriveReflectionEntry = {
+      id: uuidv4(),
+      prime_day: 0,
+      task_day: taskDay,
+      recorded_at: new Date().toISOString(),
+      notes
+    }
+
+    await onUpdate({
+      drive_checkins: [...checkins, entry],
+      drive_prompt_dates: markPromptedToday(promptDates, aspectPromptKey(aspect))
+    })
+  }
+
+  const handleAspectSave = async (note: string) => {
+    if (!dailyAspect) return
+    await saveAspectNote(dailyAspect, note)
+    setShowAspectModal(false)
+    setDailyAspect(null)
+    autoPromptedRef.current = null
   }
 
   const saveAdhocNote = async () => {
@@ -101,18 +198,7 @@ export default function TaskDrivePanel({ task, onUpdate }: TaskDrivePanelProps) 
       return
     }
 
-    const notes = emptyDriveNotes()
-    notes[adhocAspect] = trimmed
-
-    const entry: DriveReflectionEntry = {
-      id: uuidv4(),
-      prime_day: 0,
-      task_day: taskDay,
-      recorded_at: new Date().toISOString(),
-      notes
-    }
-
-    await onUpdate({ drive_checkins: [...checkins, entry] })
+    await saveAspectNote(adhocAspect, trimmed)
     setAdhocAspect(null)
     setAdhocNote('')
   }
@@ -185,13 +271,14 @@ export default function TaskDrivePanel({ task, onUpdate }: TaskDrivePanelProps) 
         )}
 
         <p className="text-xs text-gray-500">
-          {duePrime != null
-            ? `Check-in due · prime ${duePrime} (day ${taskDay})`
+          Today: {aspectsAnsweredToday}/{DRIVE_ASPECTS.length} reflections
+          {duePrimeToday != null
+            ? ` · Prime ${duePrimeToday} probe due`
             : nextPrime != null
-              ? `Next check-in: prime ${nextPrime}`
+              ? ` · Next prime probe: day ${nextPrime}`
               : workStartedAt
-                ? `Day ${taskDay} on this task`
-                : 'Start task work to begin prime-day check-ins'}
+                ? ` · Day ${taskDay}`
+                : ' · Start task work to begin check-ins'}
         </p>
 
         <details
@@ -268,7 +355,7 @@ export default function TaskDrivePanel({ task, onUpdate }: TaskDrivePanelProps) 
           type="button"
           onClick={() => {
             setModalPrime(null)
-            setShowModal(true)
+            setShowProbeModal(true)
           }}
           className="mt-2 text-xs text-orange-300 hover:text-orange-200 underline"
         >
@@ -276,7 +363,7 @@ export default function TaskDrivePanel({ task, onUpdate }: TaskDrivePanelProps) 
         </button>
       </div>
 
-      {showModal && (
+      {showProbeModal && (
         <SubtaskProbeModal
           taskId={task.id}
           taskTitle={task.title}
@@ -284,8 +371,19 @@ export default function TaskDrivePanel({ task, onUpdate }: TaskDrivePanelProps) 
           primeDay={modalPrime}
           trigger={modalPrime != null ? 'prime_day' : 'manual'}
           existingSubtasks={task.subtasks ?? []}
-          onLater={handleLater}
+          activeSubtaskId={task.active_subtask_id}
+          onLater={() => void handleProbeLater()}
           onAccept={savePrimeProbe}
+        />
+      )}
+
+      {showAspectModal && dailyAspect && (
+        <AspectDailyModal
+          taskTitle={task.title}
+          taskDay={taskDay}
+          aspect={dailyAspect}
+          onSave={handleAspectSave}
+          onLater={() => void handleAspectLater()}
         />
       )}
     </>

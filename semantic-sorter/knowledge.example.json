@@ -1,0 +1,151 @@
+{
+  "destinations": {
+    "admin": "Personal/Admin",
+    "archive": "Personal/Archive",
+    "books": "Personal/Books",
+    "career": "Personal/Career",
+    "credentials": "Personal/Sensitive",
+    "data": "Projects/Data",
+    "dev": "Projects/Code",
+    "diagrams": "Projects/Diagrams",
+    "finance": "Personal/Finance",
+    "images": "Media/Images",
+    "media": "Media/Videos",
+    "personal_notes": "Personal/Notes",
+    "presentations": "Documents/Presentations",
+    "research": "HS-Hannover/Research",
+    "screen_recordings": "Media/Screen Recordings",
+    "screenshots": "Media/Screenshots",
+    "uni": "HS-Hannover/Uni",
+    "review": "_Needs Review"
+  },
+  "aliases": {
+    "ReWe": "Rechnungswesen accounting university course",
+    "ReWeBelle": "Rechnungswesen accounting university course",
+    "BA": "Bachelorarbeit thesis university",
+    "BWL": "Betriebswirtschaftslehre business administration university",
+    "MIM": "master information management university course",
+    "EMBS": "university exam course",
+    "SPM": "software project management university course",
+    "XAI": "explainable artificial intelligence university research",
+    "LLM": "large language model research",
+    "GenAI": "generative artificial intelligence research",
+    "Notenspiegel": "transcript grades university certificate",
+    "Lebenslauf": "cv career"
+  },
+  "rules": [
+    {
+      "name": "course-rechnungswesen",
+      "destination": "HS-Hannover/Uni/Rechnungswesen",
+      "category": "uni",
+      "weight": 9,
+      "patterns": ["rewe", "rewebelle", "rechnungswesen", "accounting"],
+      "tags": ["uni", "course", "rechnungswesen"]
+    },
+    {
+      "name": "screenshots",
+      "destination": "Media/Screenshots",
+      "category": "screenshots",
+      "weight": 10,
+      "patterns": ["bildschirmfoto", "screenshot", "screen shot", "simulator screenshot"],
+      "tags": ["screenshot"]
+    },
+    {
+      "name": "screen-recordings",
+      "destination": "Media/Screen Recordings",
+      "category": "screen_recordings",
+      "weight": 10,
+      "patterns": ["bildschirmaufnahme", "screen recording"],
+      "tags": ["screen-recording"]
+    },
+    {
+      "name": "course-advanced-xai",
+      "destination": "HS-Hannover/Uni/Advanced XAI",
+      "category": "uni",
+      "weight": 8,
+      "patterns": ["advancedxai", "xai", "explainable artificial intelligence"],
+      "tags": ["uni", "course", "xai"]
+    },
+    {
+      "name": "course-software-project-management",
+      "destination": "HS-Hannover/Uni/Software Project Management",
+      "category": "uni",
+      "weight": 7,
+      "patterns": ["spm", "software project management"],
+      "tags": ["uni", "course", "spm"]
+    },
+    {
+      "name": "bachelor-thesis",
+      "destination": "HS-Hannover/Uni/Bachelorarbeit",
+      "category": "uni",
+      "weight": 7,
+      "patterns": ["bachelorarbeit", "ba thesis", "thesis"],
+      "tags": ["uni", "thesis"]
+    },
+    {
+      "name": "grade-records",
+      "destination": "Personal/Career/Education Records",
+      "category": "career",
+      "weight": 9,
+      "patterns": ["notenspiegel", "transcript", "transcriptofrecords", "grades"],
+      "tags": ["career", "education-records"]
+    },
+    {
+      "name": "cv-career",
+      "destination": "Personal/Career/CV",
+      "category": "career",
+      "weight": 9,
+      "patterns": ["lebenslauf", " cv ", "curriculum vitae"],
+      "tags": ["career", "cv"]
+    },
+    {
+      "name": "government-admin",
+      "destination": "Personal/Admin/Government",
+      "category": "admin",
+      "weight": 8,
+      "patterns": ["bafög", "bafoeg", "bescheinigung", "mietbescheinigung", "wohnungsgeber"],
+      "tags": ["admin", "government"]
+    },
+    {
+      "name": "finance-payroll",
+      "destination": "Personal/Finance/Payroll",
+      "category": "finance",
+      "weight": 9,
+      "patterns": ["gehaltsabrechnung", "gehaltsabrechnungen", "payroll", "salary"],
+      "tags": ["finance", "payroll"]
+    },
+    {
+      "name": "receipts-invoices",
+      "destination": "Personal/Finance/Receipts",
+      "category": "finance",
+      "weight": 8,
+      "patterns": ["rechnung", "receipt", "invoice"],
+      "tags": ["finance", "receipt"]
+    },
+    {
+      "name": "password-key-material",
+      "destination": "Personal/Sensitive",
+      "category": "credentials",
+      "weight": 10,
+      "patterns": [".kdbx", ".pem", ".rdp", "keepass", "password", "secret"],
+      "tags": ["sensitive"]
+    },
+    {
+      "name": "research-papers",
+      "destination": "HS-Hannover/Research/Papers",
+      "category": "research",
+      "weight": 6,
+      "patterns": ["paper", "article", "word2vec", "llm", "halluzin", "least squares", "dino"],
+      "tags": ["research", "paper"]
+    },
+    {
+      "name": "books",
+      "destination": "Personal/Books",
+      "category": "books",
+      "weight": 8,
+      "patterns": ["steve jobs", "e-myth", "zero to one", "zerotoone", "volume 1", ".epub"],
+      "tags": ["book"]
+    }
+  ],
+  "learned_examples": []
+}

@@ -9,7 +9,7 @@ export interface FocusCaptureRecord {
 
 const HASH_W = 9
 const HASH_H = 8
-const MAX_HISTORY = 5
+const MAX_HISTORY = 3
 
 /** Difference hash — fast visual fingerprint for “same screen?” checks. */
 export function computeScreenshotDHash(imagePath: string): string | null {

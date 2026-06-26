@@ -1,0 +1,22 @@
+{
+  "destinations": {
+    "admin": "Personal/Admin",
+    "archive": "Personal/Archive",
+    "books": "Personal/Books",
+    "career": "Personal/Career",
+    "credentials": "Personal/Sensitive",
+    "data": "Projects/Data",
+    "dev": "Projects/Code",
+    "diagrams": "Projects/Diagrams",
+    "finance": "Personal/Finance",
+    "images": "Media/Images",
+    "media": "Media/Videos",
+    "personal_notes": "Personal/Notes",
+    "presentations": "Documents/Presentations",
+    "research": "HS-Hannover/Research",
+    "screen_recordings": "Media/Screen Recordings",
+    "screenshots": "Media/Screenshots",
+    "uni": "HS-Hannover/Uni",
+    "review": "_Needs Review"
+  }
+}

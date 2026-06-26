@@ -1,4 +1,10 @@
 import { PRIME_MILESTONES } from './progressMilestones'
+import {
+  aspectPromptKey,
+  primePromptKey,
+  wasPromptedToday,
+  type DailyPromptDates
+} from './dailyPrompts'
 
 export type DriveAspect = 'curiosity' | 'ownership' | 'external_pressure' | 'freedom'
 
@@ -185,6 +191,52 @@ export function emptyDriveNotes(): Record<DriveAspect, string> {
 
 export function entryHasNote(entry: DriveReflectionEntry, aspect: DriveAspect): boolean {
   return !!entry.notes[aspect]?.trim()
+}
+
+export function hasAspectNoteToday(
+  checkins: DriveReflectionEntry[] | undefined,
+  aspect: DriveAspect,
+  now = Date.now()
+): boolean {
+  const today = new Date(now).toISOString().slice(0, 10)
+  return (checkins ?? []).some((entry) => {
+    if (new Date(entry.recorded_at).toISOString().slice(0, 10) !== today) return false
+    return entryHasNote(entry, aspect)
+  })
+}
+
+/** Drive aspects not yet answered or snoozed today (one prompt per aspect per day). */
+export function getDailyAspectQueue(
+  checkins: DriveReflectionEntry[] | undefined,
+  promptDates: DailyPromptDates | undefined,
+  now = Date.now()
+): DriveAspect[] {
+  return DRIVE_ASPECTS.filter(
+    (aspect) =>
+      !hasAspectNoteToday(checkins, aspect, now) &&
+      !wasPromptedToday(promptDates, aspectPromptKey(aspect), now)
+  )
+}
+
+export function countAspectsAnsweredToday(
+  checkins: DriveReflectionEntry[] | undefined,
+  now = Date.now()
+): number {
+  return DRIVE_ASPECTS.filter((aspect) => hasAspectNoteToday(checkins, aspect, now)).length
+}
+
+/** Prime probe due and not yet auto-prompted today. */
+export function isPrimeProbeDueToday(
+  taskDay: number,
+  acknowledged: number[] | undefined,
+  checkins: DriveReflectionEntry[] | undefined,
+  promptDates: DailyPromptDates | undefined,
+  now = Date.now()
+): number | null {
+  const duePrime = getDuePrimeCheckIn(taskDay, acknowledged, checkins)
+  if (duePrime == null) return null
+  if (wasPromptedToday(promptDates, primePromptKey(duePrime), now)) return null
+  return duePrime
 }
 
 export function formatCheckinRowLabel(entry: DriveReflectionEntry): string {

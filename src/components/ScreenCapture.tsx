@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useTaskStore } from '../store/taskStore'
 import type { Task } from '../store/taskStore'
+import { ScreenshotGallery } from './ScreenshotGallery'
 
 interface ScreenCaptureProps {
   selectedTaskId?: string | null
@@ -13,6 +14,9 @@ export function ScreenCapture({ selectedTaskId }: ScreenCaptureProps) {
   const [analysis, setAnalysis] = useState<string | null>(null)
   const { tasks, refreshActiveTask } = useTaskStore()
   const [taskId, setTaskId] = useState(selectedTaskId || '')
+  
+  // Get current task for screenshot history
+  const currentTask = tasks.find((t: Task) => t.id === taskId)
 
   useEffect(() => {
     if (selectedTaskId) setTaskId(selectedTaskId)
@@ -28,14 +32,35 @@ export function ScreenCapture({ selectedTaskId }: ScreenCaptureProps) {
       setLastCapture(result.imagePath)
 
       if (taskId) {
-        const analysisResult = await window.electron.analyzeScreenshotForTask(
-          taskId,
-          result.imagePath
-        )
-        setAnalysis(
-          `${analysisResult.aiPrediction} (${analysisResult.activityLabel}) — ${analysisResult.recommendation}`
-        )
-        await refreshActiveTask()
+        try {
+          const analysisResult = await window.electron.analyzeScreenshotForTask(
+            taskId,
+            result.imagePath
+          )
+          
+          // Validate analysis result has required data
+          if (analysisResult &&
+              analysisResult.aiPrediction &&
+              analysisResult.activityLabel &&
+              analysisResult.recommendation) {
+            setAnalysis(
+              `${analysisResult.aiPrediction} (${analysisResult.activityLabel}) — ${analysisResult.recommendation}`
+            )
+          } else if (analysisResult && analysisResult.aiPrediction) {
+            // Partial data available
+            setAnalysis(
+              `${analysisResult.aiPrediction}${analysisResult.activityLabel ? ` (${analysisResult.activityLabel})` : ''}${analysisResult.recommendation ? ` — ${analysisResult.recommendation}` : ''}`
+            )
+          } else {
+            // No valid analysis data
+            setAnalysis('Analysis completed but no insights were generated. The AI may need more context or the screen content was unclear.')
+          }
+          await refreshActiveTask()
+        } catch (analysisError) {
+          // Analysis failed but screenshot was captured
+          console.error('Analysis error:', analysisError)
+          setAnalysis('Screenshot captured successfully, but analysis failed. Please try again or check if the AI service is running.')
+        }
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to capture screen')
@@ -109,6 +134,13 @@ export function ScreenCapture({ selectedTaskId }: ScreenCaptureProps) {
           </ul>
         </div>
       </div>
+
+      {/* Screenshot Gallery */}
+      {taskId && currentTask?.screenshots && currentTask.screenshots.length > 0 && (
+        <div className="bg-gray-800 rounded-lg p-4 mt-4">
+          <ScreenshotGallery screenshots={currentTask.screenshots} maxDisplay={10} />
+        </div>
+      )}
     </div>
   )
 }

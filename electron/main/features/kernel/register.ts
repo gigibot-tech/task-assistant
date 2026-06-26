@@ -8,12 +8,16 @@ import {
 import { softwarePhasesManifest } from '../softwarePhases/manifest'
 import { subtaskProbeManifest } from '../subtaskProbe/manifest'
 import { workplaceManifest } from '../workplace/manifest'
+import { semanticSorterManifest } from '../semanticSorter/manifest'
+import { reviewManifest } from '../review/manifest'
 import type { FeatureModule, KernelDeps } from './types'
 
 const MODULES = sortedModules([
   subtaskProbeManifest,
   softwarePhasesManifest,
-  workplaceManifest
+  workplaceManifest,
+  semanticSorterManifest,
+  reviewManifest
 ])
 
 let featureBus: FeatureBus | null = null

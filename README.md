@@ -10,13 +10,15 @@ AI-powered task management desktop application with local Ollama integration (ge
 - **Communication Suggestions**: AI writing help in the task form
 - **SME Validation**: Validate approaches against expert knowledge
 - **Focus Monitor**: Screen capture with AI activity analysis
+- **Desktop Sorter**: Semantic file inbox sorting (Python rules + Ollama) — see [features/semantic-sorter/README.md](features/semantic-sorter/README.md)
 - **Analytics**: Task history and deviation stats
 - **Privacy First**: All data stored locally in JSON
 
 ## Prerequisites
 
 1. **Node.js** 18+ and npm
-2. **Ollama** — [ollama.ai](https://ollama.ai)
+2. **Python 3** — for the bundled semantic sorter CLI
+3. **Ollama** — [ollama.ai](https://ollama.ai)
 3. **Model**:
    ```bash
    ollama pull gemma4:latest
@@ -45,7 +47,8 @@ npm run electron:build  # distributable in release/
 - **Analytics** — productivity and screenshot history
 - **SME Validation** — expert opinion check
 - **Focus Monitor** — screen capture linked to a task
-- **Settings** — model name, deviation threshold, poll interval
+- **Desktop Sorter** — dry-run / apply semantic moves for OneDrive or Desktop inbox
+- **Settings** — model name, deviation threshold, poll interval, feature flags
 
 ### Task Detail Panel
 Click a task to open details:

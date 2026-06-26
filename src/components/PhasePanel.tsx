@@ -107,23 +107,6 @@ export default function PhasePanel({ task, flags, onUpdate }: PhasePanelProps) {
         )}
 
         <div className="flex flex-wrap gap-2">
-          {isFeatureEnabled(flags, 'phaseGitSignals') && (
-            <button
-              type="button"
-              onClick={() => void syncGit()}
-              disabled={syncing || !task.workplace_folder}
-              className="text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded"
-            >
-              {syncing ? 'Syncing git…' : 'Sync git phase'}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setShowExtractProbe(true)}
-            className="text-xs px-2 py-1 bg-teal-900/60 hover:bg-teal-800/80 border border-teal-700/50 rounded text-teal-100"
-          >
-            Start extract
-          </button>
         </div>
 
         {balance?.git_suggested_phase && balance.git_suggested_phase !== phase && (

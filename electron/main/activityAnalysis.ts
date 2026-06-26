@@ -1,5 +1,3 @@
-import axios from 'axios'
-import { nativeImage } from 'electron'
 import {
   captureScreen,
   captureScreenBase64,
@@ -18,8 +16,9 @@ import {
   runResultPipeline
 } from './features/kernel/register'
 import type { FeatureContext } from '../../src/shared/kernel/types'
-
-const OLLAMA_CHAT_URL = 'http://localhost:11434/api/chat'
+import { ollamaGenerate } from './ollamaClient'
+import { DEFAULT_OLLAMA_NUM_PREDICT } from './ollamaSettings'
+import { logVisionPayloadStats, prepareVisionBase64 } from './visionPayload'
 
 export interface TaskFocusContext {
   title: string
@@ -62,26 +61,6 @@ export function formatPlannedTask(task: TaskFocusContext): string {
     lines.push(`Description: ${task.description.trim()}`)
   }
   return lines.join('\n')
-}
-
-const VISION_MAX_WIDTH = 1280
-
-function prepareVisionBase64(pngBuffer: Buffer): string {
-  const image = nativeImage.createFromBuffer(pngBuffer)
-  const { width, height } = image.getSize()
-
-  if (width <= VISION_MAX_WIDTH) {
-    return pngBuffer.toString('base64')
-  }
-
-  const scale = VISION_MAX_WIDTH / width
-  const resized = image.resize({
-    width: VISION_MAX_WIDTH,
-    height: Math.max(1, Math.round(height * scale)),
-    quality: 'good'
-  })
-
-  return resized.toPNG().toString('base64')
 }
 
 function stripModelNoise(raw: string): string {
@@ -166,51 +145,6 @@ function clampSimilarity(value: unknown): number {
   return Math.min(1, Math.max(0, n))
 }
 
-async function ollamaGenerate(
-  model: string,
-  prompt: string,
-  images?: string[]
-): Promise<string> {
-  const message: Record<string, unknown> = { role: 'user', content: prompt }
-  if (images?.length) {
-    message.images = images
-  }
-
-  const body: Record<string, unknown> = {
-    model,
-    messages: [message],
-    stream: false,
-    format: 'json',
-    options: { temperature: 0.2, num_predict: 512 }
-  }
-
-  let lastError: Error | null = null
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const response = await axios.post(OLLAMA_CHAT_URL, body, { timeout: 120000 })
-      const text = response.data?.message?.content ?? response.data?.response
-
-      if (response.data?.error) {
-        throw new Error(String(response.data.error))
-      }
-      if (typeof text !== 'string' || !text.trim()) {
-        throw new Error('Empty Ollama response')
-      }
-
-      return text
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err))
-      if (attempt === 0) {
-        console.warn('[ollama] Request failed, retrying once:', lastError.message)
-        await new Promise((resolve) => setTimeout(resolve, 1500))
-      }
-    }
-  }
-
-  throw lastError ?? new Error('Ollama request failed')
-}
-
 const FOCUS_SCORING_RULES = `Scoring rules (similarity 0.0-1.0):
 - 0.0-0.25: unrelated activity (social media, games, entertainment, unrelated apps)
 - 0.2-0.45: planning/organizing only — task managers, to-do apps, calendars, or Task Assistant while merely viewing or editing this task (NOT doing the real work)
@@ -220,7 +154,8 @@ const FOCUS_SCORING_RULES = `Scoring rules (similarity 0.0-1.0):
 export async function compareTaskToActivity(
   model: string,
   task: TaskFocusContext,
-  currentActivity: string
+  currentActivity: string,
+  options?: { showErrorDialog?: boolean; numPredict?: number }
 ): Promise<{ similarity: number; explanation: string; onTask: boolean }> {
   const plannedTask = formatPlannedTask(task)
   const prompt = `You are a strict focus coach. Compare the user's PLANNED task with what they are ACTUALLY doing.
@@ -237,7 +172,10 @@ Set onTask to true only when they are doing substantive work that advances the p
 
 Respond with JSON: {"similarity": 0.0-1.0, "onTask": true/false, "explanation": "brief coaching note"}`
 
-  const raw = await ollamaGenerate(model, prompt)
+  const raw = await ollamaGenerate(model, prompt, undefined, {
+    numPredict: options?.numPredict ?? DEFAULT_OLLAMA_NUM_PREDICT,
+    showErrorDialog: options?.showErrorDialog ?? false
+  })
   const parsed = parseJsonResponse<{
     similarity?: number
     onTask?: boolean
@@ -261,6 +199,8 @@ export async function checkDeviationFromScreen(
     recentScreenSimilarity?: number
     recentScreenSampleCount?: number
     featureFlags?: FeatureFlags
+    showErrorDialog?: boolean
+    numPredict?: number
   }
 ): Promise<DeviationResult> {
   const status = getScreenPermissionStatus()
@@ -337,7 +277,13 @@ Viewing or organizing this task in a task manager / planner / Task Assistant doe
 Respond with JSON only:
 {"activity":"detailed on-screen activity","label":"short label e.g. writing, task-manager","similarity":0.0,"onTask":false,"explanation":"one sentence coaching note"${hasSubtasks ? ',"matched_subtask_id":null,"on_active_subtask":false,"work_mode":"off_task"' : ''}${phaseBlock ? ',"codebase_phase_match":true' : ''}}`
 
-  const raw = await ollamaGenerate(model, prompt, [base64])
+  const visionImages = [base64]
+  logVisionPayloadStats(visionImages, 'checkDeviationFromScreen')
+
+  const raw = await ollamaGenerate(model, prompt, visionImages, {
+    numPredict: options?.numPredict ?? DEFAULT_OLLAMA_NUM_PREDICT,
+    showErrorDialog: options?.showErrorDialog ?? false
+  })
   const parsed = parseJsonResponse<{
     activity?: string
     label?: string
@@ -411,7 +357,8 @@ Respond with JSON only:
 
 export async function analyzeScreenshotActivity(
   model: string,
-  saveCapture = true
+  saveCapture = true,
+  options?: { numPredict?: number; showErrorDialog?: boolean }
 ): Promise<ActivityAnalysis> {
   let imagePath: string | undefined
   let base64: string
@@ -429,7 +376,13 @@ export async function analyzeScreenshotActivity(
   const prompt = `Look at this screenshot. Describe what the user is actively doing — name specific apps and content visible.
 Respond with JSON only: {"activity": "detailed description", "label": "short label e.g. coding, task-manager, browsing"}`
 
-  const raw = await ollamaGenerate(model, prompt, [base64])
+  const visionImages = [base64]
+  logVisionPayloadStats(visionImages, 'analyzeScreenshotActivity')
+
+  const raw = await ollamaGenerate(model, prompt, visionImages, {
+    numPredict: options?.numPredict ?? DEFAULT_OLLAMA_NUM_PREDICT,
+    showErrorDialog: options?.showErrorDialog ?? false
+  })
   const parsed = parseJsonResponse<{ activity?: string; label?: string }>(raw)
 
   return {

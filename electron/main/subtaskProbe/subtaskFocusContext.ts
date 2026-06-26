@@ -25,7 +25,7 @@ export function formatSubtaskForPrompt(st: SubtaskRecord, index: number): string
   return `${index + 1}. [${st.id}] ${st.title}${iot} — ${st.outcome || 'no outcome yet'} (${st.status || 'pending'})`
 }
 
-export function formatSubtaskFocusBlock(ctx: SubtaskFocusContext): string {
+export function formatSubtaskFocusBlock(ctx: SubtaskFocusContext, maxSubtasks = 4): string {
   const lines: string[] = []
   const active = ctx.activeSubtask
   if (active) {
@@ -42,8 +42,15 @@ export function formatSubtaskFocusBlock(ctx: SubtaskFocusContext): string {
 
   const list = ctx.subtasks ?? []
   if (list.length > 0) {
-    lines.push('All subtasks:')
-    list.forEach((st, i) => lines.push(formatSubtaskForPrompt(st, i)))
+    const activeId = active?.id
+    const others = list.filter((st) => st.id !== activeId)
+    const capped = others.slice(0, Math.max(0, maxSubtasks - (active ? 1 : 0)))
+    lines.push('Subtasks (most relevant only — not full history):')
+    if (active) lines.push(formatSubtaskForPrompt(active, 0))
+    capped.forEach((st, i) => lines.push(formatSubtaskForPrompt(st, i + (active ? 1 : 0))))
+    if (others.length > capped.length) {
+      lines.push(`… ${others.length - capped.length} more subtask(s) omitted from prompt`)
+    }
   }
 
   return lines.join('\n')

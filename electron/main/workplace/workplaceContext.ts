@@ -15,13 +15,12 @@ import {
   type WorkplaceGuidance,
   type RecoveryTaskContext
 } from './deviationRecovery'
+import { getActiveWorkplacePath, type TaskWithWorkspaces } from '../../../src/shared/workplace/workspaces'
 
 export type { WorkplaceIndex, WorkplaceGuidance, RecoveryTaskContext }
 
-export interface WorkplaceTaskRecord extends RecoveryTaskContext {
+export interface WorkplaceTaskRecord extends RecoveryTaskContext, TaskWithWorkspaces {
   id?: string
-  workplace_folder?: string | null
-  workplace_index?: WorkplaceIndex
   last_on_task_capture?: {
     imagePath: string
     capturedAt: string
@@ -31,13 +30,17 @@ export interface WorkplaceTaskRecord extends RecoveryTaskContext {
   workplace_guidance?: WorkplaceGuidance
 }
 
+function resolveWorkplaceRoot(task: WorkplaceTaskRecord): string | null {
+  return validateWorkplaceFolder(getActiveWorkplacePath(task))
+}
+
 const GUIDANCE_COOLDOWN_MS = 10 * 60 * 1000
 
 export function indexTaskWorkplace(
   task: WorkplaceTaskRecord,
   settings?: WorkplaceSettings
 ): WorkplaceIndex | null {
-  const root = validateWorkplaceFolder(task.workplace_folder)
+  const root = resolveWorkplaceRoot(task)
   if (!root) return null
   return indexWorkplaceFolder(root, settings)
 }
@@ -60,7 +63,7 @@ export async function runDeviationRecovery(
     forceRefresh?: boolean
   }
 ): Promise<WorkplaceGuidance | null> {
-  const root = validateWorkplaceFolder(task.workplace_folder)
+  const root = resolveWorkplaceRoot(task)
   if (!root) return null
 
   if (!options?.forceRefresh && isGuidanceCacheFresh(task)) {
@@ -104,7 +107,7 @@ export function openWorkplacePath(
   task: WorkplaceTaskRecord,
   relativePath: string
 ): { success: boolean; error?: string } {
-  const root = validateWorkplaceFolder(task.workplace_folder)
+  const root = resolveWorkplaceRoot(task)
   if (!root) return { success: false, error: 'No workplace folder set' }
 
   const abs = resolveSafePath(root, relativePath)

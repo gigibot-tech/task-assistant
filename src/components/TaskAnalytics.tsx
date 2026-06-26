@@ -5,6 +5,8 @@ import {
   type WastedStats
 } from '../lib/subtaskTypes'
 import { formatWastedDuration, todayDateKey, weekKey } from '../lib/wastedTimeDisplay'
+import { getTaskTimeStatus } from '../lib/electron-api'
+import { formatDuration } from '../lib/timeFormat'
 
 interface TaskAnalytics {
   totalTasks: number
@@ -68,6 +70,17 @@ export function TaskAnalytics() {
     extracts: number
   } | null>(null)
   const [softwarePhasesEnabled, setSoftwarePhasesEnabled] = useState(false)
+  const [breakTotals, setBreakTotals] = useState<{
+    totalBreakSeconds: number
+    totalPauseSeconds: number
+  } | null>(null)
+  const [recentTaskTime, setRecentTaskTime] = useState<{
+    title: string
+    workSeconds: number
+    breakSeconds: number
+    pauseSeconds: number
+    sessionCount: number
+  } | null>(null)
 
   useEffect(() => {
     loadAnalytics()
@@ -164,6 +177,50 @@ export function TaskAnalytics() {
       } else {
         setPhaseTotals(null)
       }
+
+      const tasksWithSessions = tasks.filter(
+        (t: TaskWithHistory) => (t.work_sessions?.length ?? 0) > 0
+      )
+      let totalBreak = 0
+      let totalPause = 0
+      let recentTask: TaskWithHistory | null = null
+      let recentMs = 0
+      let recentStatus: Awaited<ReturnType<typeof getTaskTimeStatus>> = null
+
+      for (const t of tasksWithSessions) {
+        const status = await getTaskTimeStatus(t.id)
+        if (!status) continue
+        totalBreak += status.breakSeconds
+        totalPause += status.pauseSeconds
+
+        const sessions = t.work_sessions ?? []
+        const lastMs = Math.max(
+          ...sessions.map((s) =>
+            Math.max(
+              new Date(s.started_at).getTime(),
+              s.ended_at ? new Date(s.ended_at).getTime() : Date.now()
+            )
+          )
+        )
+        if (lastMs >= recentMs) {
+          recentMs = lastMs
+          recentTask = t
+          recentStatus = status
+        }
+      }
+
+      setBreakTotals({ totalBreakSeconds: totalBreak, totalPauseSeconds: totalPause })
+      if (recentTask && recentStatus) {
+        setRecentTaskTime({
+          title: recentTask.title,
+          workSeconds: recentStatus.liveSeconds,
+          breakSeconds: recentStatus.breakSeconds,
+          pauseSeconds: recentStatus.pauseSeconds,
+          sessionCount: recentStatus.sessionCount
+        })
+      } else {
+        setRecentTaskTime(null)
+      }
     } catch (error) {
       console.error('Failed to load analytics:', error)
     } finally {
@@ -250,6 +307,37 @@ export function TaskAnalytics() {
           icon="🌟"
         />
       </div>
+
+      {breakTotals && (
+        <div className="bg-gray-800 rounded-lg p-6">
+          <h3 className="text-lg font-semibold text-white mb-4">Work · break · pause</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-4">
+            <StatCard
+              title="Total break (all tasks)"
+              value={formatDuration(breakTotals.totalBreakSeconds)}
+              icon="☕"
+              color="blue"
+            />
+            <StatCard
+              title="Total paused (all tasks)"
+              value={formatDuration(breakTotals.totalPauseSeconds)}
+              icon="⏸"
+            />
+          </div>
+          {recentTaskTime && (
+            <div className="p-4 rounded-lg bg-amber-900/20 border border-amber-700/40">
+              <p className="text-xs text-amber-400 font-medium mb-2">Most recent task</p>
+              <p className="text-sm font-semibold text-white mb-1">{recentTaskTime.title}</p>
+              <p className="text-xs text-gray-300 font-mono">
+                {formatDuration(recentTaskTime.workSeconds)} work ·{' '}
+                {formatDuration(recentTaskTime.breakSeconds)} break ·{' '}
+                {formatDuration(recentTaskTime.pauseSeconds)} paused ·{' '}
+                {recentTaskTime.sessionCount} sessions
+              </p>
+            </div>
+          )}
+        </div>
+      )}
 
       {wastedStats && (
         <div className="bg-gray-800 rounded-lg p-6">

@@ -8,6 +8,10 @@ import {
   type TaskSubtask
 } from '../lib/subtaskTypes'
 import { setActiveSubtask } from '../lib/electron-api'
+import {
+  estimateSubtaskTime,
+  subtaskHasEstimateContext
+} from '../lib/taskEstimate'
 import SubtaskProbeModal from './SubtaskProbeModal'
 import { isFeatureEnabled, type FeatureFlags } from '../features/types'
 
@@ -27,6 +31,8 @@ export default function SubtaskPanel({ task, flags, onUpdate, onStuck }: Subtask
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
   const [transformation, setTransformation] = useState('')
+  const [estimatingId, setEstimatingId] = useState<string | null>(null)
+  const [estimateError, setEstimateError] = useState<string | null>(null)
 
   const subtasks = task.subtasks ?? []
   const activeId = task.active_subtask_id ?? null
@@ -77,6 +83,22 @@ export default function SubtaskPanel({ task, flags, onUpdate, onStuck }: Subtask
         : s
     )
     await onUpdate({ subtasks: next })
+  }
+
+  const runSubtaskEstimate = async (subtaskId: string) => {
+    setEstimatingId(subtaskId)
+    setEstimateError(null)
+    try {
+      const result = await estimateSubtaskTime(task.id, subtaskId)
+      const next = subtasks.map((s) =>
+        s.id === subtaskId ? { ...s, ai_estimate_minutes: result.estimate } : s
+      )
+      await onUpdate({ subtasks: next })
+    } catch (err) {
+      setEstimateError(err instanceof Error ? err.message : 'Subtask estimate failed')
+    } finally {
+      setEstimatingId(null)
+    }
   }
 
   const mustCodeBy = (task as Task & { probe_must_code_by?: string }).probe_must_code_by
@@ -141,52 +163,79 @@ export default function SubtaskPanel({ task, flags, onUpdate, onStuck }: Subtask
                         : 'bg-gray-900/40 border-gray-700/60'
                     }`}
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <span className="font-medium text-gray-200">{st.title}</span>
-                        <span
-                          className={`ml-2 px-1.5 py-0.5 rounded text-[10px] uppercase ${
-                            st.status === 'done'
-                              ? 'bg-green-900/60 text-green-200'
-                              : st.status === 'active'
-                                ? 'bg-violet-800/60 text-violet-200'
-                                : 'bg-gray-700 text-gray-400'
-                          }`}
-                        >
-                          {st.status}
-                        </span>
-                        {ready && (
-                          <p className="text-gray-500 mt-1 truncate">{formatSubtaskIot(st)}</p>
-                        )}
-                      </div>
-                      <div className="flex flex-col gap-1 shrink-0">
-                        {!isActive && st.status !== 'done' && (
-                          <button
-                            type="button"
-                            disabled={!ready}
-                            title={ready ? 'Set active' : 'Fill input, output, transformation first'}
-                            onClick={() => void setActive(st.id)}
-                            className="px-2 py-0.5 bg-violet-800 hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed rounded text-[10px] text-white"
+                    <div className="space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <span className="font-medium text-gray-200">{st.title}</span>
+                          <span
+                            className={`ml-2 px-1.5 py-0.5 rounded text-[10px] uppercase ${
+                              st.status === 'done'
+                                ? 'bg-green-900/60 text-green-200'
+                                : st.status === 'active'
+                                  ? 'bg-violet-800/60 text-violet-200'
+                                  : 'bg-gray-700 text-gray-400'
+                            }`}
                           >
-                            Set active
-                          </button>
-                        )}
-                        {(st.status === 'done' || st.status === 'active') && (
-                          <label className="flex items-center gap-1 text-[10px] text-gray-400 cursor-pointer">
+                            {st.status}
+                          </span>
+                          {ready && (
+                            <p className="text-gray-500 mt-1 truncate">{formatSubtaskIot(st)}</p>
+                          )}
+                          {st.ai_estimate_minutes != null && (
+                            <p className="text-indigo-300/80 mt-1">
+                              ~{st.ai_estimate_minutes} min
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex flex-col gap-1 shrink-0">
+                          {subtaskHasEstimateContext(st) && (
+                            <button
+                              type="button"
+                              onClick={() => void runSubtaskEstimate(st.id)}
+                              disabled={estimatingId === st.id}
+                              className="px-2 py-0.5 bg-indigo-900/50 hover:bg-indigo-800/70 disabled:opacity-40 rounded text-[10px] text-indigo-100"
+                            >
+                              {estimatingId === st.id ? '…' : st.ai_estimate_minutes ? 'Re-est' : 'Est'}
+                            </button>
+                          )}
+                          {!isActive && st.status !== 'done' && (
+                            <button
+                              type="button"
+                              disabled={!ready}
+                              title={ready ? 'Set active' : 'Fill input, output, transformation first'}
+                              onClick={() => void setActive(st.id)}
+                              className="px-2 py-0.5 bg-violet-800 hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed rounded text-[10px] text-white"
+                            >
+                              Set active
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      
+                      {(st.status === 'done' || st.status === 'active') && (
+                        <div className="pl-2 border-l-2 border-gray-700">
+                          <label className="flex items-center gap-2 text-[11px] cursor-pointer hover:text-gray-300 transition-colors">
                             <input
                               type="checkbox"
                               checked={!!st.validated_with_real_input}
                               onChange={(e) => void markValidated(st.id, e.target.checked)}
+                              className="w-3.5 h-3.5 rounded border-gray-600 text-green-600 focus:ring-green-500 focus:ring-offset-gray-900"
                             />
-                            Tested w/ real input
+                            <span className={st.validated_with_real_input ? 'text-green-300' : 'text-gray-400'}>
+                              Tested w/ real input
+                            </span>
                           </label>
-                        )}
-                      </div>
+                        </div>
+                      )}
                     </div>
                   </li>
                 )
               })}
             </ul>
+
+            {estimateError && (
+              <p className="text-xs text-red-300 mt-2">{estimateError}</p>
+            )}
 
             {showAdd && (
               <div className="mt-3 space-y-2 border-t border-gray-700 pt-3">

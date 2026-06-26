@@ -1,6 +1,6 @@
 /** Safe wrappers — preload only loads on app start; renderer HMR can outpace main. */
 
-export const REQUIRED_PRELOAD_VERSION = 9
+export const REQUIRED_PRELOAD_VERSION = 11
 
 export interface ScreenPermissionResponse {
   status: string
@@ -15,6 +15,8 @@ export interface TaskTimeStatus {
   isPaused: boolean
   recordedSeconds: number
   liveSeconds: number
+  breakSeconds: number
+  pauseSeconds: number
   currentSessionStartedAt: string | null
   sessionCount: number
 }
@@ -177,6 +179,40 @@ export async function completeTaskWork(taskId: string) {
   missing('completeTaskWork')
 }
 
+/** Start or resume the work timer after committing to a probe subtask. */
+export async function startOrResumeTaskWork(taskId: string): Promise<unknown> {
+  const timeStatus = await getTaskTimeStatus(taskId)
+  if (timeStatus?.isRunning) {
+    if (hasFn('setActiveTask')) await window.electron.setActiveTask(taskId)
+    return null
+  }
+
+  const task =
+    timeStatus && timeStatus.sessionCount > 0
+      ? await resumeTaskWork(taskId)
+      : await startTaskWork(taskId)
+
+  if (hasFn('setActiveTask')) await window.electron.setActiveTask(taskId)
+  return task
+}
+
+export async function allocateOfflineTime(
+  taskId: string,
+  payload: { offlineStartIso: string; breakMinutes: number; workMinutes: number }
+) {
+  if (hasFn('allocateOfflineTime')) {
+    return window.electron.allocateOfflineTime(taskId, payload)
+  }
+  missing('allocateOfflineTime')
+}
+
+export async function generateReviewSchedule(taskId: string, daysAvailable: number) {
+  if (hasFn('generateReviewSchedule')) {
+    return window.electron.generateReviewSchedule(taskId, daysAvailable)
+  }
+  missing('generateReviewSchedule')
+}
+
 export async function getMonitoringStatus(): Promise<MonitoringStatus> {
   const fromSettings = async (stale: boolean) => {
     if (!hasFn('getSettings')) {
@@ -275,4 +311,39 @@ export async function setWorkPhase(
 export async function syncPhaseGitSignals(taskId: string) {
   if (hasFn('syncPhaseGitSignals')) return window.electron.syncPhaseGitSignals(taskId)
   missing('syncPhaseGitSignals')
+}
+
+export async function semanticSorterDryRun() {
+  if (hasFn('semanticSorterDryRun')) return window.electron.semanticSorterDryRun()
+  missing('semanticSorterDryRun')
+}
+
+export async function semanticSorterApply(
+  decisions: Parameters<Window['electron']['semanticSorterApply']>[0]
+) {
+  if (hasFn('semanticSorterApply')) return window.electron.semanticSorterApply(decisions)
+  missing('semanticSorterApply')
+}
+
+export async function semanticSorterSaveFeedback(
+  record: Parameters<Window['electron']['semanticSorterSaveFeedback']>[0]
+) {
+  if (hasFn('semanticSorterSaveFeedback')) return window.electron.semanticSorterSaveFeedback(record)
+  missing('semanticSorterSaveFeedback')
+}
+
+export async function semanticSorterPickFolder() {
+  if (hasFn('semanticSorterPickFolder')) return window.electron.semanticSorterPickFolder()
+  missing('semanticSorterPickFolder')
+}
+
+export async function semanticSorterGetSettings() {
+  if (hasFn('semanticSorterGetSettings')) return window.electron.semanticSorterGetSettings()
+  missing('semanticSorterGetSettings')
+}
+
+export async function semanticSorterUpdateSettings(partial: Record<string, unknown>) {
+  if (hasFn('semanticSorterUpdateSettings'))
+    return window.electron.semanticSorterUpdateSettings(partial)
+  missing('semanticSorterUpdateSettings')
 }

@@ -20,6 +20,7 @@ interface PomodoroSettings {
 
 interface Settings {
   ollamaModel: string
+  ollamaNumPredict: number
   deviationThreshold: number
   pollIntervalMinutes: number
   staleSensitivity: 'low' | 'medium' | 'high'
@@ -47,6 +48,7 @@ const defaultPomodoro = (): PomodoroSettings => ({
 export default function SettingsPanel() {
   const [settings, setSettings] = useState<Settings>({
     ollamaModel: 'gemma4:latest',
+    ollamaNumPredict: 1024,
     deviationThreshold: 0.7,
     pollIntervalMinutes: 5,
     staleSensitivity: 'medium',
@@ -60,6 +62,7 @@ export default function SettingsPanel() {
     window.electron.getSettings().then((s) => {
       setSettings({
         ollamaModel: s.ollamaModel || 'gemma4:latest',
+        ollamaNumPredict: s.ollamaNumPredict ?? 1024,
         deviationThreshold: s.deviationThreshold ?? 0.7,
         pollIntervalMinutes: s.pollIntervalMinutes ?? 5,
         staleSensitivity: s.staleSensitivity || 'medium',
@@ -105,6 +108,27 @@ export default function SettingsPanel() {
             placeholder="gemma4:latest"
           />
           <p className="text-xs text-gray-500 mt-1">Default: gemma4:latest — run `ollama pull gemma4:latest`</p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium mb-2">
+            Ollama max output tokens ({settings.ollamaNumPredict})
+          </label>
+          <input
+            type="range"
+            min={256}
+            max={4096}
+            step={128}
+            value={settings.ollamaNumPredict}
+            onChange={(e) =>
+              setSettings({ ...settings, ollamaNumPredict: parseInt(e.target.value, 10) })
+            }
+            className="w-full"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            Maps to Ollama <code className="text-gray-400">num_predict</code>. Increase (e.g. 1536–2048)
+            if screen checks return empty responses — thinking models can burn tokens before JSON output.
+          </p>
         </div>
 
         <div>
@@ -321,6 +345,16 @@ export default function SettingsPanel() {
               />
             </div>
           </div>
+        </div>
+
+        <div className="pt-4 border-t border-gray-700 space-y-3">
+          <h3 className="text-lg font-semibold">Desktop sorter</h3>
+          <p className="text-xs text-gray-500">
+            Paths used by Desktop Sorter. You can also edit them in that view.
+          </p>
+          <p className="text-xs text-gray-500">
+            Ollama threshold: use Desktop Sorter panel toggles; feature flag above enables the nav item.
+          </p>
         </div>
 
         <div className="pt-4 border-t border-gray-700 space-y-4">

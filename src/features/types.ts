@@ -32,5 +32,13 @@ export const FEATURE_LABELS: Record<
   phaseBalanceAlerts: {
     label: 'Phase balance alerts',
     tooltip: 'Remind when playground dominates without extraction (requires software phases)'
+  },
+  semanticSorter: {
+    label: 'Desktop semantic sorter',
+    tooltip: 'Sort Desktop/OneDrive inbox files with rules + Ollama review'
+  },
+  review: {
+    label: 'Worktree code review',
+    tooltip: 'Multi-day file review schedule with checkmarks and date coloring'
   }
 }
