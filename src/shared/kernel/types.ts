@@ -7,6 +7,7 @@ export type FeatureId =
   | 'phaseBalanceAlerts'
   | 'semanticSorter'
   | 'review'
+  | 'smeValidator'
 
 export type FeatureFlags = Record<FeatureId, boolean>
 
@@ -16,7 +17,8 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   phaseGitSignals: true,
   phaseBalanceAlerts: true,
   semanticSorter: true,
-  review: true
+  review: true,
+  smeValidator: true
 }
 
 export type PipelineHook =

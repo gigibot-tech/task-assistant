@@ -101,6 +101,9 @@ export interface Task {
   review_statuses?: Record<string, FileReviewStatus>
   /** AI-generated review schedule */
   review_schedule?: ReviewSchedule
+  /** SME expert opinion validations — timeline per task */
+  sme_validations?: import('../types/smeValidation').SmeValidationEntry[]
+  sme_window_days?: import('../types/smeValidation').SmeWindowDays
 }
 
 interface TaskStore {

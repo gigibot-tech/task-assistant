@@ -16,3 +16,7 @@ export function semanticSorterActive(flags: FeatureFlags): boolean {
 export function reviewActive(flags: FeatureFlags): boolean {
   return isFeatureEnabled(flags, 'review')
 }
+
+export function smeValidatorActive(flags: FeatureFlags): boolean {
+  return isFeatureEnabled(flags, 'smeValidator')
+}

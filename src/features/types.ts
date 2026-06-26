@@ -40,5 +40,9 @@ export const FEATURE_LABELS: Record<
   review: {
     label: 'Worktree code review',
     tooltip: 'Multi-day file review schedule with checkmarks and date coloring'
+  },
+  smeValidator: {
+    label: 'SME opinion validation',
+    tooltip: 'Per-task expert opinion checks with timeline and subtask recommendations'
   }
 }

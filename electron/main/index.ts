@@ -106,6 +106,7 @@ import {
   applyScheduleToStatuses,
   generateReviewSchedule
 } from './review/reviewScheduler'
+import { runSmeValidation, smeTaskContextFromRecord } from './sme/smeValidator'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -1374,6 +1375,87 @@ Respond with JSON: {"suggestions": ["..."], "improvements": ["more clear", ...]}
     }
   })
 
+  ipcMain.handle(
+    'validate-sme-for-task',
+    async (_: unknown, taskId: string, domain: string, approach: string) => {
+      const data = readData()
+      const taskIndex = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
+      if (taskIndex === -1) throw new Error('Task not found')
+
+      const task = data.tasks[taskIndex] as Record<string, unknown>
+      const entry = await runSmeValidation(
+        getOllamaModel(),
+        smeTaskContextFromRecord(task),
+        domain,
+        approach,
+        data.settings
+      )
+
+      const validations = [...((task.sme_validations as unknown[]) ?? []), entry]
+      data.tasks[taskIndex] = {
+        ...task,
+        sme_validations: validations,
+        updated_at: new Date().toISOString()
+      }
+      writeData(data)
+      return entry
+    }
+  )
+
+  ipcMain.handle(
+    'promote-sme-step-to-subtask',
+    async (_: unknown, taskId: string, entryId: string, stepIndex: number) => {
+      const data = readData()
+      const taskIndex = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
+      if (taskIndex === -1) throw new Error('Task not found')
+
+      const task = data.tasks[taskIndex] as Record<string, unknown>
+      const validations = (task.sme_validations ?? []) as Array<{
+        id: string
+        recommended_steps?: Array<{ title: string; rationale: string }>
+        promoted_subtask_ids?: string[]
+      }>
+      const entry = validations.find((e) => e.id === entryId)
+      const step = entry?.recommended_steps?.[stepIndex]
+      if (!entry || !step) throw new Error('SME step not found')
+
+      const { v4: uuidv4 } = await import('uuid')
+      const subtaskId = uuidv4()
+      const rationale = step.rationale?.trim() || step.title
+      const subtask = {
+        id: subtaskId,
+        title: step.title.trim(),
+        input: '',
+        output: step.title.trim(),
+        transformation: rationale,
+        outcome: rationale,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+        source: 'ai_sme',
+        sme_validation_id: entryId
+      }
+
+      const nextValidations = validations.map((e) =>
+        e.id === entryId
+          ? {
+              ...e,
+              promoted_subtask_ids: [...(e.promoted_subtask_ids ?? []), subtaskId]
+            }
+          : e
+      )
+
+      data.tasks[taskIndex] = {
+        ...task,
+        subtasks: [...((task.subtasks as unknown[]) ?? []), subtask],
+        sme_validations: nextValidations,
+        updated_at: new Date().toISOString()
+      }
+      writeData(data)
+      return { subtask, task: data.tasks[taskIndex] }
+    }
+  )
+
+  /** @deprecated Use validate-sme-for-task */
   ipcMain.handle('validate-sme', async (_: any, approach: string, domain: string) => {
     try {
       const prompt = `As a ${domain} expert, evaluate this approach:

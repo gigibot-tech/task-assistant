@@ -4,7 +4,7 @@ export type ThinkingBand = 'under_10m' | '30m' | '1_2h' | 'more'
 
 export type SubtaskStatus = 'pending' | 'active' | 'done' | 'blocked'
 
-export type SubtaskSource = 'user' | 'ai_probe' | 'prime_day' | 'stuck'
+export type SubtaskSource = 'user' | 'ai_probe' | 'ai_sme' | 'prime_day' | 'stuck'
 
 export type StuckTrigger = 'deviation' | 'stale' | 'manual' | 'prime_day'
 
@@ -47,6 +47,7 @@ export interface TaskSubtask {
   ai_estimate_minutes?: number
   source: SubtaskSource
   phase?: SoftwarePhase
+  sme_validation_id?: string
   extraction_of_subtask_id?: string
   extraction_checks?: ExtractionChecks
 }

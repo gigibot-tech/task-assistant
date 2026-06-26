@@ -1,6 +1,6 @@
 /** Safe wrappers — preload only loads on app start; renderer HMR can outpace main. */
 
-export const REQUIRED_PRELOAD_VERSION = 11
+export const REQUIRED_PRELOAD_VERSION = 12
 
 export interface ScreenPermissionResponse {
   status: string
@@ -211,6 +211,24 @@ export async function generateReviewSchedule(taskId: string, daysAvailable: numb
     return window.electron.generateReviewSchedule(taskId, daysAvailable)
   }
   missing('generateReviewSchedule')
+}
+
+export async function validateSmeForTask(taskId: string, domain: string, approach: string) {
+  if (hasFn('validateSmeForTask')) {
+    return window.electron.validateSmeForTask(taskId, domain, approach)
+  }
+  missing('validateSmeForTask')
+}
+
+export async function promoteSmeStepToSubtask(
+  taskId: string,
+  entryId: string,
+  stepIndex: number
+) {
+  if (hasFn('promoteSmeStepToSubtask')) {
+    return window.electron.promoteSmeStepToSubtask(taskId, entryId, stepIndex)
+  }
+  missing('promoteSmeStepToSubtask')
 }
 
 export async function getMonitoringStatus(): Promise<MonitoringStatus> {

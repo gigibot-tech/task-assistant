@@ -10,10 +10,12 @@ import { subtaskProbeManifest } from '../subtaskProbe/manifest'
 import { workplaceManifest } from '../workplace/manifest'
 import { semanticSorterManifest } from '../semanticSorter/manifest'
 import { reviewManifest } from '../review/manifest'
+import { smeManifest } from '../sme/manifest'
 import type { FeatureModule, KernelDeps } from './types'
 
 const MODULES = sortedModules([
   subtaskProbeManifest,
+  smeManifest,
   softwarePhasesManifest,
   workplaceManifest,
   semanticSorterManifest,

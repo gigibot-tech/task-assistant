@@ -3,6 +3,7 @@ import WorkplacePanel from '../components/WorkplacePanel'
 import SubtaskPanel from '../components/SubtaskPanel'
 import PhasePanel from '../components/PhasePanel'
 import TaskDrivePanel from '../components/TaskDrivePanel'
+import TaskSmePanel from '../components/TaskSmePanel'
 import type { Task } from '../store/taskStore'
 import { isFeatureEnabled, type FeatureFlags, type FeatureId } from './types'
 
@@ -31,6 +32,12 @@ const TASK_DETAIL_SLOTS: TaskDetailSlot[] = [
     id: 'taskDrive',
     order: 15,
     render: ({ task, onUpdate }) => <TaskDrivePanel task={task} onUpdate={onUpdate} />
+  },
+  {
+    id: 'smeValidator',
+    order: 18,
+    gatedBy: 'smeValidator',
+    render: ({ task, onUpdate }) => <TaskSmePanel task={task} onUpdate={onUpdate} />
   },
   {
     id: 'subtaskProbe',

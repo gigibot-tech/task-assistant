@@ -1154,7 +1154,16 @@ function App() {
           )}
           {activeView === 'analytics' && <TaskAnalytics />}
           {activeView === 'settings' && <SettingsPanel />}
-          {activeView === 'sme' && <SMEValidation />}
+          {activeView === 'sme' && (
+            <SMEValidation
+              task={selectedTask}
+              onUpdate={async (updates) => {
+                if (!selectedTask) return
+                await window.electron.updateTask(selectedTask.id, updates)
+                setSelectedTask({ ...selectedTask, ...updates })
+              }}
+            />
+          )}
           {activeView === 'desktop_sorter' && semanticSorterActive(featureFlags) && (
             <SemanticSorterPanel />
           )}

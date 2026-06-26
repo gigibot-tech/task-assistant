@@ -167,6 +167,28 @@ export default function SubtaskPanel({ task, flags, onUpdate, onStuck }: Subtask
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <span className="font-medium text-gray-200">{st.title}</span>
+                          {st.source === 'ai_sme' && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-indigo-900/50 text-indigo-200"
+                              title={
+                                st.sme_validation_id
+                                  ? `From SME validation ${
+                                      task.sme_validations
+                                        ?.find((v) => v.id === st.sme_validation_id)
+                                        ?.recorded_at
+                                        ? new Date(
+                                            task.sme_validations!.find(
+                                              (v) => v.id === st.sme_validation_id
+                                            )!.recorded_at
+                                          ).toLocaleDateString()
+                                        : ''
+                                    }`
+                                  : 'From SME expert recommendation'
+                              }
+                            >
+                              SME
+                            </span>
+                          )}
                           <span
                             className={`ml-2 px-1.5 py-0.5 rounded text-[10px] uppercase ${
                               st.status === 'done'

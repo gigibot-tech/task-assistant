@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electron', {
-  preloadVersion: 11,
+  preloadVersion: 12,
   getTasks: () => ipcRenderer.invoke('get-tasks'),
   createTask: (task: any) => ipcRenderer.invoke('create-task', task),
   updateTask: (id: string, updates: any) => ipcRenderer.invoke('update-task', id, updates),
@@ -26,6 +26,10 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('suggest-communication', text, context),
   validateWithSME: (approach: string, domain: string) =>
     ipcRenderer.invoke('validate-sme', approach, domain),
+  validateSmeForTask: (taskId: string, domain: string, approach: string) =>
+    ipcRenderer.invoke('validate-sme-for-task', taskId, domain, approach),
+  promoteSmeStepToSubtask: (taskId: string, entryId: string, stepIndex: number) =>
+    ipcRenderer.invoke('promote-sme-step-to-subtask', taskId, entryId, stepIndex),
 
   getSettings: () => ipcRenderer.invoke('get-settings'),
   updateSettings: (settings: any) => ipcRenderer.invoke('update-settings', settings),
@@ -183,6 +187,27 @@ export interface ElectronAPI {
     agreement: 'agree' | 'disagree' | 'partial'
     reasoning: string
   }>
+  validateSmeForTask: (
+    taskId: string,
+    domain: string,
+    approach: string
+  ) => Promise<{
+    id: string
+    recorded_at: string
+    domain: string
+    approach: string
+    alignment: number
+    agreement: 'agree' | 'disagree' | 'partial'
+    feedback: string
+    reasoning: string
+    recommended_steps?: Array<{ title: string; rationale: string; priority?: string }>
+    promoted_subtask_ids?: string[]
+  }>
+  promoteSmeStepToSubtask: (
+    taskId: string,
+    entryId: string,
+    stepIndex: number
+  ) => Promise<{ subtask: Record<string, unknown>; task: Record<string, unknown> }>
   getSettings: () => Promise<Record<string, any>>
   updateSettings: (settings: any) => Promise<{ success: boolean }>
   checkOllamaHealth: () => Promise<{ online: boolean; modelAvailable: boolean; model: string }>
