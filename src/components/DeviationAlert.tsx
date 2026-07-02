@@ -37,7 +37,8 @@ export default function DeviationAlert({ onReturnToTask, onStuckProbe, onAddSubt
   const [visible, setVisible] = useState(false)
 
   useEffect(() => {
-    window.electron?.onNotification((data: { type: string; data: DeviationData }) => {
+    if (!window.electron?.onNotification) return
+    return window.electron.onNotification((data: { type: string; data: DeviationData }) => {
       if (data.type === 'deviation_alert') {
         setDeviation(data.data)
         setVisible(true)

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import TaskList from './components/TaskList'
 import TaskForm from './components/TaskForm'
 import DeviationAlert from './components/DeviationAlert'
@@ -10,6 +10,7 @@ import SMEValidation from './components/SMEValidation'
 import { ScreenCapture } from './components/ScreenCapture'
 import { TaskAnalytics } from './components/TaskAnalytics'
 import OfflineTimePrompt from './components/OfflineTimePrompt'
+import MonitorPicker from './components/MonitorPicker'
 import WorktreeReviewTab from './components/WorktreeReviewTab'
 import { useTaskStore } from './store/taskStore'
 import type { Task } from './store/taskStore'
@@ -42,12 +43,21 @@ import {
   focusCheckFromNotification,
   focusCheckFromSettings
 } from './lib/focusCheckDisplay'
-import type { StuckTrigger } from './lib/subtaskTypes'
+import type { StuckTrigger, SoftwarePhase } from './lib/subtaskTypes'
 import { useFeatureFlags } from './features/useFeatureFlags'
 import { renderTaskDetailSlots } from './features/manifests'
+import type { OpenProbeOptions } from './features/manifests'
 import SemanticSorterPanel from './components/SemanticSorterPanel'
 import { semanticSorterActive, reviewActive, smeValidatorActive, focusMonitorActive } from './features/registry'
 import { allocateOfflineTime } from './lib/electron-api'
+import {
+  buildMigrationPatch,
+  createTechnicalBreakdownItem,
+  resolveTaskBreakdown
+} from './lib/breakdownHelpers'
+import { needsMigration } from './lib/taskBreakdownMigration'
+import { calculateProgress } from './lib/taskBreakdownTypes'
+import { clampProgressPercent } from './lib/progressMilestones'
 
 type ActiveView = 'tasks' | 'analytics' | 'settings' | 'sme' | 'focus' | 'desktop_sorter' | 'review'
 type TaskFilter = 'all' | 'in_progress' | 'completed'
@@ -102,6 +112,9 @@ function App() {
   const [stuckProbe, setStuckProbe] = useState<{
     taskId: string
     trigger: StuckTrigger
+    workPhase?: SoftwarePhase
+    taskDay?: number
+    primeDay?: number | null
   } | null>(null)
   const [phaseNotice, setPhaseNotice] = useState<string | null>(null)
   const [offlineTimePrompt, setOfflineTimePrompt] = useState<{
@@ -186,16 +199,14 @@ function App() {
   // Listen for Ollama runtime errors from main process
   useEffect(() => {
     if (!window.electron.onNotification) return
-    
-    window.electron.onNotification((data: any) => {
+
+    return window.electron.onNotification((data: { type?: string; model?: string; command?: string; timestamp?: number }) => {
       if (data.type === 'ollama-error') {
-        console.log('[renderer] Received Ollama error notification:', data)
         setOllamaRuntimeError({
-          model: data.model,
-          command: data.command,
-          timestamp: data.timestamp
+          model: data.model ?? '',
+          command: data.command ?? '',
+          timestamp: data.timestamp ?? Date.now()
         })
-        // Also update the status to show the banner
         setOllamaStatus('offline')
       }
     })
@@ -234,9 +245,26 @@ function App() {
     [activeTask?.id, loadTasks, refreshTaskTimeStatus, setActiveTask]
   )
 
-  const openStuckProbe = useCallback((taskId: string, trigger: StuckTrigger) => {
-    setStuckProbe({ taskId, trigger })
-  }, [])
+  const openStuckProbe = useCallback(
+    (taskId: string, trigger: StuckTrigger, options?: OpenProbeOptions) => {
+      setStuckProbe({
+        taskId,
+        trigger,
+        workPhase: options?.workPhase,
+        taskDay: options?.taskDay,
+        primeDay: options?.primeDay
+      })
+    },
+    []
+  )
+
+  const openProbeForTask = useCallback(
+    (trigger: StuckTrigger, options?: OpenProbeOptions) => {
+      if (!selectedTask) return
+      openStuckProbe(selectedTask.id, trigger, options)
+    },
+    [selectedTask, openStuckProbe]
+  )
 
   const applyFocusDisplay = useCallback(
     (display: ReturnType<typeof focusCheckFromSettings>) => {
@@ -272,6 +300,19 @@ function App() {
       applyFocusDisplay(null)
     }
   }, [selectedTask, applyFocusFromSettings, applyFocusDisplay])
+
+  const migrationPersistedRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!selectedTask || migrationPersistedRef.current.has(selectedTask.id)) return
+    if (!needsMigration(selectedTask)) return
+    const patch = buildMigrationPatch(selectedTask)
+    if (!patch) return
+    migrationPersistedRef.current.add(selectedTask.id)
+    void window.electron.updateTask(selectedTask.id, patch).then((updated) => {
+      setSelectedTask(updated)
+      void loadTasks()
+    })
+  }, [selectedTask, loadTasks])
 
   const refreshMonitoringState = useCallback(async () => {
     try {
@@ -380,7 +421,9 @@ function App() {
   }, [activeTask?.id, selectedTask?.id, refreshTaskTimeStatus])
 
   useEffect(() => {
-    window.electron.onNotification((data: { type: string; data?: Record<string, unknown> }) => {
+    if (!window.electron.onNotification) return
+
+    return window.electron.onNotification((data: { type: string; data?: Record<string, unknown> }) => {
       if (data.type === 'screen_permission_needed') {
         checkScreenPermission()
       }
@@ -460,25 +503,6 @@ function App() {
           )
         }
       }
-      if (data.type === 'stuck_probe_offer' && data.data) {
-        const payload = data.data as { taskId?: string; trigger?: StuckTrigger }
-        if (payload.taskId) {
-          const trigger = payload.trigger ?? 'deviation'
-          if (trigger === 'deviation' || trigger === 'stale') {
-            const task = tasks.find((t) => t.id === payload.taskId)
-            if (
-              task &&
-              wasPromptedToday(task.drive_prompt_dates, probePromptKey(trigger))
-            ) {
-              return
-            }
-          }
-          setStuckProbe({
-            taskId: payload.taskId,
-            trigger
-          })
-        }
-      }
       if (data.type === 'phase_alert' && data.data) {
         const payload = data.data as { message?: string }
         if (payload.message) setPhaseNotice(payload.message)
@@ -500,7 +524,7 @@ function App() {
         }
       }
     })
-  }, [checkScreenPermission, refreshMonitoringState, refreshPomodoro, tasks, selectedTask?.id, applyFocusDisplay, checkOllama, loadTasks])
+  }, [checkScreenPermission, refreshMonitoringState, selectedTask?.id, applyFocusDisplay, checkOllama, loadTasks])
 
   useEffect(() => {
     if (checkInProgress) {
@@ -845,6 +869,7 @@ function App() {
           <div>
             <h1 className="text-2xl font-bold text-primary-400">Task Assistant</h1>
             <p className="text-sm text-gray-400">AI-powered task management with gemma4:latest</p>
+            <MonitorPicker compact className="mt-1" />
           </div>
           <div className="flex items-center gap-4">
             {activeView === 'tasks' && quickStartTask && (
@@ -1085,6 +1110,11 @@ function App() {
 
       <div className="flex-1 flex overflow-hidden">
         <aside className="w-64 bg-gray-800 border-r border-gray-700 p-4 flex flex-col">
+          {activeView === 'tasks' && (
+            <div className="mb-4 pb-4 border-b border-gray-700">
+              <MonitorPicker />
+            </div>
+          )}
           <nav className="space-y-1">
             <p className="text-xs text-gray-500 uppercase tracking-wide px-4 mb-2">Tasks</p>
             <button
@@ -1291,16 +1321,19 @@ function App() {
 
               <TaskBreakdownPanel
                 task={selectedTask}
+                flags={featureFlags}
                 onUpdate={async (updates: Partial<Task>) => {
                   const updated = await window.electron.updateTask(selectedTask.id, updates)
                   setSelectedTask(updated)
                   await loadTasks()
                 }}
+                onOpenProbe={(trigger) => openProbeForTask(trigger)}
               />
 
               {renderTaskDetailSlots({
                 task: selectedTask,
                 flags: featureFlags,
+                onOpenProbe: (trigger, options) => openProbeForTask(trigger, options),
                 onUpdate: async (updates) => {
                   const merged = { ...updates }
                   if (updates.phase_balance && selectedTask.phase_balance) {
@@ -1535,9 +1568,26 @@ function App() {
         onAddSubtask={async (taskId: string, subtask: import('./lib/subtaskTypes').TaskSubtask) => {
           const task = tasks.find((t) => t.id === taskId)
           if (!task) return
-          
-          const updatedSubtasks = [...(task.subtasks || []), subtask]
-          await window.electron.updateTask(taskId, { subtasks: updatedSubtasks })
+
+          const items = resolveTaskBreakdown(task)
+          const newItem = createTechnicalBreakdownItem({
+            id: subtask.id,
+            title: subtask.title,
+            input: subtask.input,
+            output: subtask.output,
+            transformation: subtask.transformation,
+            outcome: subtask.outcome,
+            status: subtask.status,
+            source: 'user',
+            phase: subtask.phase,
+            order: items.length
+          })
+          await window.electron.updateTask(taskId, {
+            task_breakdown: [...items, newItem],
+            progress_percent: clampProgressPercent(
+              calculateProgress([...items, newItem])
+            )
+          })
           await loadTasks()
         }}
       />
@@ -1564,8 +1614,11 @@ function App() {
           <SubtaskProbeModal
             taskId={probeTask.id}
             taskTitle={probeTask.title}
+            taskDay={stuckProbe.taskDay}
+            primeDay={stuckProbe.primeDay}
             trigger={stuckProbe.trigger}
-            existingSubtasks={probeTask.subtasks ?? []}
+            workPhase={stuckProbe.workPhase}
+            existingItems={resolveTaskBreakdown(probeTask)}
             activeSubtaskId={probeTask.active_subtask_id}
             onLater={() => {
               void snoozeAutoProbe().finally(() => setStuckProbe(null))
@@ -1575,10 +1628,13 @@ function App() {
             }}
             onAccept={async (updates) => {
               const patch: Partial<Task> = {
-                subtasks: updates.subtasks,
+                task_breakdown: updates.task_breakdown,
                 active_subtask_id: updates.active_subtask_id,
                 probe_must_code_by: updates.probe_must_code_by,
-                work_phase: updates.work_phase
+                work_phase: updates.work_phase,
+                progress_percent: clampProgressPercent(
+                  calculateProgress(updates.task_breakdown)
+                )
               }
               if (updates.phase_balance) {
                 patch.phase_balance = {
@@ -1599,6 +1655,11 @@ function App() {
                     ...updates.drive_acknowledged_primes
                   ])
                 ]
+              }
+              if (stuckProbe.workPhase === 'extract') {
+                patch.work_phase = updates.work_phase ?? 'core'
+                patch.work_phase_source = 'probe'
+                patch.work_phase_set_at = new Date().toISOString()
               }
               const updated = await window.electron.updateTask(probeTask.id, patch)
               if (selectedTask?.id === probeTask.id) setSelectedTask(updated)

@@ -1,14 +1,22 @@
 import { useEffect, useMemo, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import type { ProbeResult, SoftwarePhase, StuckTrigger, ThinkingBand } from '../lib/subtaskTypes'
+import { THINKING_BAND_LABELS, buildOutcome } from '../lib/subtaskTypes'
+import type { TaskBreakdownItem } from '../lib/taskBreakdownTypes'
 import {
-  THINKING_BAND_LABELS,
-  buildOutcome,
-  type TaskSubtask
-} from '../lib/subtaskTypes'
+  breakdownToTaskSubtasks,
+  createTechnicalBreakdownItem,
+  resolveTaskBreakdown,
+  upsertBreakdownFromProbe
+} from '../lib/breakdownHelpers'
 import { recordStuckEvent, runSubtaskProbe, setActiveSubtask, startOrResumeTaskWork } from '../lib/electron-api'
 import type { Task } from '../store/taskStore'
 import { useTaskStore } from '../store/taskStore'
+import { PHASE_LABELS } from '../features/softwarePhases/types'
+
+function isExtractInputStep(workPhase?: SoftwarePhase): boolean {
+  return workPhase === 'extract'
+}
 
 export interface SubtaskProbeModalProps {
   taskId: string
@@ -17,10 +25,12 @@ export interface SubtaskProbeModalProps {
   primeDay?: number | null
   trigger: StuckTrigger
   workPhase?: SoftwarePhase
-  existingSubtasks?: TaskSubtask[]
+  /** @deprecated Use existingItems */
+  existingSubtasks?: import('../lib/subtaskTypes').TaskSubtask[]
+  existingItems?: TaskBreakdownItem[]
   activeSubtaskId?: string | null
   onAccept: (updates: {
-    subtasks: TaskSubtask[]
+    task_breakdown: TaskBreakdownItem[]
     active_subtask_id: string
     probe_must_code_by?: string
     drive_acknowledged_primes?: number[]
@@ -45,12 +55,36 @@ export default function SubtaskProbeModal({
   trigger,
   workPhase,
   existingSubtasks = [],
+  existingItems,
   activeSubtaskId,
   onAccept,
   onLater,
   onWorkTimerStarted
 }: SubtaskProbeModalProps) {
   const { loadTasks, setActiveTask } = useTaskStore()
+  const existingBreakdown =
+    existingItems ??
+    (existingSubtasks.length > 0
+      ? existingSubtasks.map((st, idx) =>
+          createTechnicalBreakdownItem({
+            id: st.id,
+            title: st.title,
+            input: st.input,
+            output: st.output,
+            transformation: st.transformation,
+            outcome: st.outcome,
+            status: st.status,
+            source: st.source === 'ai_sme' ? 'ai_sme' : 'user',
+            phase: st.phase,
+            order: idx,
+            sme_validation_id: st.sme_validation_id,
+            extraction_of_subtask_id: st.extraction_of_subtask_id,
+            extraction_checks: st.extraction_checks,
+            ai_estimate_minutes: st.ai_estimate_minutes
+          })
+        )
+      : [])
+  const existingSubtaskCompat = breakdownToTaskSubtasks(existingBreakdown)
   const [step, setStep] = useState<Step>(bandRequired(trigger) ? 'band' : 'input')
   const [thinkingBand, setThinkingBand] = useState<ThinkingBand | null>(null)
   const [userLine, setUserLine] = useState('')
@@ -70,6 +104,7 @@ export default function SubtaskProbeModal({
   const [extractE2e, setExtractE2e] = useState(false)
 
   const isExtractFlow = workPhase === 'extract' || probe?.extraction_ready
+  const extractInputStep = isExtractInputStep(workPhase)
 
   const headerLabel = useMemo(() => {
     if (primeDay != null && taskDay != null) {
@@ -123,36 +158,38 @@ export default function SubtaskProbeModal({
     setLoading(true)
     setProbeError(null)
     try {
-      // FIRST: Persist that challenge was requested for this day
-      const today = new Date().toISOString().split('T')[0] // YYYY-MM-DD format
+      const today = new Date().toISOString().split('T')[0]
       const challengeRequestKey = `challenge_requested_${taskId}_${today}`
-      
-      // Build validation summary from checkboxes
-      const validations = []
-      if (validateUseful) validations.push('useful')
-      if (validateExplainable) validations.push('explainable')
-      if (validateE2e) validations.push('e2e')
-      const validationLine = validations.length > 0
-        ? `Validating: ${validations.join(', ')}`
-        : undefined
-      
-      // Save to localStorage before running probe
-      localStorage.setItem(challengeRequestKey, JSON.stringify({
-        taskId,
-        taskTitle,
-        requestedAt: new Date().toISOString(),
-        day: taskDay,
-        primeDay,
-        trigger,
-        userLine: validationLine,
-        thinkingBand: thinkingBand ?? undefined,
-        validations
-      }))
-      
-      // THEN: Run the probe logic
+
+      let probeUserLine: string | undefined
+      if (extractInputStep) {
+        const validations = []
+        if (validateUseful) validations.push('useful')
+        if (validateExplainable) validations.push('explainable')
+        if (validateE2e) validations.push('e2e')
+        probeUserLine =
+          validations.length > 0 ? `Validating: ${validations.join(', ')}` : undefined
+      } else {
+        probeUserLine = userLine.trim() || undefined
+      }
+
+      localStorage.setItem(
+        challengeRequestKey,
+        JSON.stringify({
+          taskId,
+          taskTitle,
+          requestedAt: new Date().toISOString(),
+          day: taskDay,
+          primeDay,
+          trigger,
+          userLine: probeUserLine,
+          thinkingBand: thinkingBand ?? undefined
+        })
+      )
+
       const result = await runSubtaskProbe(taskId, {
         trigger,
-        userLine: validationLine,
+        userLine: probeUserLine,
         thinkingBand: thinkingBand ?? undefined
       })
       setProbe(result)
@@ -186,11 +223,15 @@ export default function SubtaskProbeModal({
 
       const parentPlaygroundId =
         workPhase === 'extract'
-          ? existingSubtasks.find((s) => s.id === activeSubtaskId && s.phase === 'playground')?.id ??
-            existingSubtasks.find((s) => s.phase === 'playground' && s.validated_with_real_input)?.id
+          ? existingSubtaskCompat.find(
+              (s) => s.id === activeSubtaskId && s.phase === 'playground'
+            )?.id ??
+            existingSubtaskCompat.find(
+              (s) => s.phase === 'playground' && s.validated_with_real_input
+            )?.id
           : undefined
 
-      const newSubtask: TaskSubtask = {
+      const newItem = createTechnicalBreakdownItem({
         id: subtaskId,
         title: editTitle.trim() || probe.suggested_subtask.title,
         input: editInput.trim(),
@@ -198,20 +239,15 @@ export default function SubtaskProbeModal({
         transformation: editTransformation.trim(),
         outcome,
         status: 'active',
-        created_at: new Date().toISOString(),
         source,
         phase: subtaskPhase,
+        order: existingBreakdown.length,
         extraction_of_subtask_id: parentPlaygroundId,
         extraction_checks:
           isExtractFlow || probe.extraction_ready
             ? { useful: extractUseful, explainable: extractExplainable, e2e: extractE2e }
             : undefined
-      }
-
-      const deactivated = existingSubtasks.map((st) => ({
-        ...st,
-        status: st.status === 'active' ? ('pending' as const) : st.status
-      }))
+      })
 
       if (thinkingBand && bandRequired(trigger)) {
         await recordStuckEvent(taskId, {
@@ -219,14 +255,14 @@ export default function SubtaskProbeModal({
           thinking_band: thinkingBand,
           subtask_id: subtaskId,
           ai_challenge: probe.challenge,
-          ai_suggested_subtask: newSubtask.title
+          ai_suggested_subtask: newItem.title
         })
       }
 
       await setActiveSubtask(taskId, subtaskId)
 
       const updates: Parameters<typeof onAccept>[0] = {
-        subtasks: [...deactivated, newSubtask],
+        task_breakdown: upsertBreakdownFromProbe(existingBreakdown, newItem, subtaskId),
         active_subtask_id: subtaskId,
         probe_must_code_by: probe.must_code_by
       }
@@ -288,12 +324,8 @@ export default function SubtaskProbeModal({
           )}
           {probe?.recommended_phase && !workPhase && (
             <p className="text-xs text-teal-400 mt-1">
-              Suggested phase: {PHASE_LABELS[probe.recommended_phase as SoftwarePhase] ?? probe.recommended_phase}
-            </p>
-          )}
-          {trigger !== 'prime_day' && (
-            <p className="text-xs text-gray-500 mt-1">
-              Think a lot, build little? Pick how long you designed before coding.
+              Suggested phase:{' '}
+              {PHASE_LABELS[probe.recommended_phase as SoftwarePhase] ?? probe.recommended_phase}
             </p>
           )}
         </div>
@@ -302,6 +334,9 @@ export default function SubtaskProbeModal({
           <div className="space-y-3">
             <p className="text-sm text-gray-300">
               How long were you thinking/designing before coding?
+            </p>
+            <p className="text-xs text-gray-500">
+              Think a lot, build little? Pick a band — then describe what you are stuck on.
             </p>
             <div className="grid grid-cols-2 gap-2">
               {bands.map(([band, label]) => (
@@ -328,46 +363,75 @@ export default function SubtaskProbeModal({
                 Band: {THINKING_BAND_LABELS[thinkingBand]}
               </p>
             )}
-            <p className="block text-sm text-gray-300">
-              What are you trying to validate right now?
-            </p>
-            <div className="space-y-2 bg-gray-800/50 border border-gray-700 rounded-lg p-3">
-              <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
-                <input
-                  type="checkbox"
-                  checked={validateUseful}
-                  onChange={(e) => setValidateUseful(e.target.checked)}
-                  className="w-4 h-4"
+            {extractInputStep ? (
+              <>
+                <p className="block text-sm text-gray-300">
+                  Which materialization checks apply to this extract?
+                </p>
+                <div className="space-y-2 bg-gray-800/50 border border-gray-700 rounded-lg p-3">
+                  <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
+                    <input
+                      type="checkbox"
+                      checked={validateUseful}
+                      onChange={(e) => setValidateUseful(e.target.checked)}
+                      className="w-4 h-4"
+                    />
+                    Useful again?
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
+                    <input
+                      type="checkbox"
+                      checked={validateExplainable}
+                      onChange={(e) => setValidateExplainable(e.target.checked)}
+                      className="w-4 h-4"
+                    />
+                    Explainable simply?
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
+                    <input
+                      type="checkbox"
+                      checked={validateE2e}
+                      onChange={(e) => setValidateE2e(e.target.checked)}
+                      className="w-4 h-4"
+                    />
+                    Works end-to-end?
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleRunProbe()}
+                  disabled={
+                    loading ||
+                    (!validateUseful && !validateExplainable && !validateE2e)
+                  }
+                  className="w-full px-3 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-medium text-white disabled:opacity-50"
+                >
+                  {loading ? 'Probing…' : 'Get AI challenge'}
+                </button>
+              </>
+            ) : (
+              <>
+                <label className="block text-sm text-gray-300" htmlFor="probe-user-line">
+                  What are you stuck on or trying to validate right now?
+                </label>
+                <textarea
+                  id="probe-user-line"
+                  value={userLine}
+                  onChange={(e) => setUserLine(e.target.value)}
+                  placeholder="e.g. whether the auth flow works with real tokens, or which file to edit next…"
+                  rows={3}
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-lg text-sm text-gray-100 placeholder:text-gray-500"
                 />
-                Useful again?
-              </label>
-              <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
-                <input
-                  type="checkbox"
-                  checked={validateExplainable}
-                  onChange={(e) => setValidateExplainable(e.target.checked)}
-                  className="w-4 h-4"
-                />
-                Explainable simply?
-              </label>
-              <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
-                <input
-                  type="checkbox"
-                  checked={validateE2e}
-                  onChange={(e) => setValidateE2e(e.target.checked)}
-                  className="w-4 h-4"
-                />
-                Works end-to-end?
-              </label>
-            </div>
-            <button
-              type="button"
-              onClick={() => void handleRunProbe()}
-              disabled={loading || (!validateUseful && !validateExplainable && !validateE2e)}
-              className="w-full px-3 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-medium text-white disabled:opacity-50"
-            >
-              {loading ? 'Probing…' : 'Get AI challenge'}
-            </button>
+                <button
+                  type="button"
+                  onClick={() => void handleRunProbe()}
+                  disabled={loading}
+                  className="w-full px-3 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-medium text-white disabled:opacity-50"
+                >
+                  {loading ? 'Probing…' : 'Get AI challenge'}
+                </button>
+              </>
+            )}
             {probeError && (
               <p className="text-xs text-red-300 bg-red-950/50 border border-red-800/60 rounded px-2 py-1.5">
                 {probeError}

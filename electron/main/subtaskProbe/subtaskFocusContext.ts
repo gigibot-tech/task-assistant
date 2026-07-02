@@ -1,15 +1,11 @@
 import { formatPlannedTask, type TaskFocusContext } from '../activityAnalysis'
+import {
+  breakdownToSubtaskRecords,
+  type SubtaskRecord
+} from '../../../src/lib/breakdownHelpers'
+import type { TaskBreakdownItem } from '../../../src/lib/taskBreakdownTypes'
 
-export interface SubtaskRecord {
-  id: string
-  title: string
-  input?: string
-  output?: string
-  transformation?: string
-  outcome?: string
-  status?: string
-  phase?: string
-}
+export type { SubtaskRecord }
 
 export interface SubtaskFocusContext extends TaskFocusContext {
   activeSubtask?: SubtaskRecord | null
@@ -59,13 +55,16 @@ export function formatSubtaskFocusBlock(ctx: SubtaskFocusContext, maxSubtasks = 
 export function taskSubtaskContextFromTask(task: {
   title: string
   description?: string
+  task_breakdown?: TaskBreakdownItem[]
   subtasks?: SubtaskRecord[]
   active_subtask_id?: string | null
   work_phase?: string
 }): SubtaskFocusContext {
-  const subtasks = task.subtasks ?? []
-  const activeSubtask =
-    subtasks.find((s) => s.id === task.active_subtask_id) ?? null
+  const subtasks =
+    task.task_breakdown?.length
+      ? breakdownToSubtaskRecords(task.task_breakdown)
+      : (task.subtasks ?? [])
+  const activeSubtask = subtasks.find((s) => s.id === task.active_subtask_id) ?? null
 
   return {
     title: task.title,
@@ -79,6 +78,7 @@ export function taskSubtaskContextFromTask(task: {
 export function formatProbeTaskBlock(task: {
   title: string
   description?: string
+  task_breakdown?: TaskBreakdownItem[]
   subtasks?: SubtaskRecord[]
   active_subtask_id?: string | null
 }): string {

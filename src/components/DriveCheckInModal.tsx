@@ -1,26 +1,39 @@
 import { useEffect, useState } from 'react'
 import TooltipChip from './TooltipChip'
 import {
-  DRIVE_ASPECTS,
   DRIVE_ASPECT_LABELS,
   emptyDriveNotes,
+  getAspectBullets,
   getAspectPromptQuestion,
   getAspectTooltip,
-  type DriveAspect
+  type DriveAspect,
+  type DriveCheckInMode
 } from '../lib/taskDrive'
 
 interface DriveCheckInModalProps {
   taskTitle: string
   taskDay: number
   primeDay: number
+  mode: DriveCheckInMode
+  aspects: DriveAspect[]
+  initialNotes?: Partial<Record<DriveAspect, string>>
   onSave: (notes: Record<DriveAspect, string>) => Promise<void>
   onLater: () => void
+}
+
+function modeSubtitle(mode: DriveCheckInMode, taskDay: number, primeDay: number): string {
+  if (mode === 'prime') return `Day ${taskDay} · Prime ${primeDay} check-in`
+  if (mode === 'daily') return `Day ${taskDay} · Daily reflection`
+  return `Day ${taskDay} · Reflection`
 }
 
 export default function DriveCheckInModal({
   taskTitle,
   taskDay,
   primeDay,
+  mode,
+  aspects,
+  initialNotes,
   onSave,
   onLater
 }: DriveCheckInModalProps) {
@@ -28,9 +41,20 @@ export default function DriveCheckInModal({
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
-    setNotes(emptyDriveNotes())
+    setNotes(mergeInitialNotes(initialNotes))
     setSaving(false)
-  }, [primeDay, taskTitle])
+    // Reset when modal context changes, not on every initialNotes object reference
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [primeDay, taskTitle, mode, aspects.join('|')])
+
+  function mergeInitialNotes(partial?: Partial<Record<DriveAspect, string>>) {
+    const base = emptyDriveNotes()
+    if (!partial) return base
+    for (const aspect of aspects) {
+      if (partial[aspect]) base[aspect] = partial[aspect] ?? ''
+    }
+    return base
+  }
 
   const setAspect = (aspect: DriveAspect, value: string) => {
     setNotes((prev) => ({ ...prev, [aspect]: value }))
@@ -54,7 +78,7 @@ export default function DriveCheckInModal({
       <div className="w-full max-w-lg bg-gray-900 border border-violet-700/60 rounded-xl shadow-2xl p-5 animate-slide-up max-h-[90vh] overflow-y-auto">
         <div className="mb-4">
           <p className="text-xs text-violet-300 font-medium uppercase tracking-wide">
-            Day {taskDay} · Prime {primeDay} check-in
+            {modeSubtitle(mode, taskDay, primeDay)}
           </p>
           <h2 id="drive-checkin-title" className="text-lg font-semibold text-white mt-0.5 truncate">
             {taskTitle}
@@ -62,7 +86,7 @@ export default function DriveCheckInModal({
         </div>
 
         <div className="flex flex-wrap gap-2 mb-4">
-          {DRIVE_ASPECTS.map((aspect) => (
+          {aspects.map((aspect) => (
             <TooltipChip
               key={aspect}
               label={DRIVE_ASPECT_LABELS[aspect]}
@@ -71,9 +95,17 @@ export default function DriveCheckInModal({
           ))}
         </div>
 
-        <div className="space-y-3">
-          {DRIVE_ASPECTS.map((aspect) => (
+        <div className="space-y-4">
+          {aspects.map((aspect) => (
             <div key={aspect}>
+              <p className="text-sm font-medium text-violet-200 mb-1">
+                {DRIVE_ASPECT_LABELS[aspect]}
+              </p>
+              <ul className="text-xs text-gray-500 mb-2 space-y-0.5 list-disc list-inside">
+                {getAspectBullets(aspect).map((bullet) => (
+                  <li key={bullet}>{bullet}</li>
+                ))}
+              </ul>
               <label className="sr-only" htmlFor={`drive-${aspect}`}>
                 {DRIVE_ASPECT_LABELS[aspect]}
               </label>
@@ -96,7 +128,7 @@ export default function DriveCheckInModal({
             disabled={saving}
             className="flex-1 px-3 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm text-gray-300 disabled:opacity-50"
           >
-            Later
+            Later today
           </button>
           <button
             type="button"

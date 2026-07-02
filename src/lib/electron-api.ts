@@ -2,7 +2,7 @@
 
 import { toAppFileUrl } from '../shared/appFileUrl'
 
-export const REQUIRED_PRELOAD_VERSION = 13
+export const REQUIRED_PRELOAD_VERSION = 14
 
 export function appFileUrl(filePath: string): string {
   if (!filePath) return ''

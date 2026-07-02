@@ -32,7 +32,7 @@ export interface Task {
   /** @deprecated Use task_breakdown instead. Kept for backward compatibility during migration. */
   subtasks?: import('../lib/subtaskTypes').TaskSubtask[]
   active_subtask_id?: string | null
-  /** New unified task breakdown system - replaces progress_checklist and subtasks */
+  /** Unified task breakdown — single source of truth for work items */
   task_breakdown?: import('../lib/taskBreakdownTypes').TaskBreakdownItem[]
   /** @deprecated Use workspaces + active_workspace_id. Kept synced from active workspace. */
   workplace_folder?: string | null

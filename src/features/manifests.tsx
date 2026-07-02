@@ -1,16 +1,29 @@
 import type { ReactNode } from 'react'
 import WorkplacePanel from '../components/WorkplacePanel'
-import SubtaskPanel from '../components/SubtaskPanel'
 import PhasePanel from '../components/PhasePanel'
 import TaskDrivePanel from '../components/TaskDrivePanel'
 import TaskSmePanel from '../components/TaskSmePanel'
 import type { Task } from '../store/taskStore'
 import { isFeatureEnabled, type FeatureFlags, type FeatureId } from './types'
 
+import type { StuckTrigger, SoftwarePhase } from '../lib/subtaskTypes'
+
+export interface OpenProbeOptions {
+  workPhase?: SoftwarePhase
+  taskDay?: number
+  primeDay?: number | null
+}
+
+export type OpenProbeHandler = (
+  trigger: StuckTrigger,
+  options?: OpenProbeOptions
+) => void
+
 export interface TaskDetailSlotProps {
   task: Task
   flags: FeatureFlags
   onUpdate: (updates: Partial<Task>) => Promise<void>
+  onOpenProbe?: OpenProbeHandler
 }
 
 type TaskDetailSlot = {
@@ -31,7 +44,9 @@ const TASK_DETAIL_SLOTS: TaskDetailSlot[] = [
   {
     id: 'taskDrive',
     order: 15,
-    render: ({ task, onUpdate }) => <TaskDrivePanel task={task} onUpdate={onUpdate} />
+    render: ({ task, onUpdate, onOpenProbe }) => (
+      <TaskDrivePanel task={task} onUpdate={onUpdate} onOpenProbe={onOpenProbe} />
+    )
   },
   {
     id: 'smeValidator',
@@ -40,19 +55,11 @@ const TASK_DETAIL_SLOTS: TaskDetailSlot[] = [
     render: ({ task, onUpdate }) => <TaskSmePanel task={task} onUpdate={onUpdate} />
   },
   {
-    id: 'subtaskProbe',
-    order: 20,
-    gatedBy: 'subtaskProbe',
-    render: ({ task, flags, onUpdate }) => (
-      <SubtaskPanel task={task} flags={flags} onUpdate={onUpdate} />
-    )
-  },
-  {
     id: 'softwarePhases',
     order: 30,
     gatedBy: 'softwarePhases',
-    render: ({ task, flags, onUpdate }) => (
-      <PhasePanel task={task} flags={flags} onUpdate={onUpdate} />
+    render: ({ task, flags, onUpdate, onOpenProbe }) => (
+      <PhasePanel task={task} flags={flags} onUpdate={onUpdate} onOpenProbe={onOpenProbe} />
     )
   }
 ]

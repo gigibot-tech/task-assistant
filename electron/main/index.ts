@@ -1,8 +1,8 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog, protocol } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog, protocol, screen } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import fs from 'fs'
-import { captureScreen, captureScreenBase64, cleanupOldScreenshots, getRecentScreenshots, getScreenPermissionStatus, requestScreenPermission, openScreenRecordingSettings, verifyScreenCaptureWorks } from './screenCapture'
+import { captureScreen, captureScreenBase64, cleanupOldScreenshots, getRecentScreenshots, getScreenPermissionStatus, requestScreenPermission, openScreenRecordingSettings, verifyScreenCaptureWorks, listCaptureDisplays, setCaptureDisplayResolver } from './screenCapture'
 import { checkDeviationFromScreen, analyzeScreenshotActivity, analyzeScreenshotAtPath, compareTaskToActivity, formatPlannedTask } from './activityAnalysis'
 import { deliverDeviationAlert, updateTrayMonitoringLabel } from './focusAlerts'
 import { initNativeNotifications, openNotificationSettings, showNativeNotification } from './nativeNotifications'
@@ -109,7 +109,13 @@ import {
   generateReviewSchedule
 } from './review/reviewScheduler'
 import { runSmeValidation, smeTaskContextFromRecord } from './sme/smeValidator'
+import { DEFAULT_DRIVE_ENABLED_ASPECTS } from '../../src/lib/taskDrive'
 import { fromAppFileUrl } from '../../src/shared/appFileUrl'
+import { migrateTaskToBreakdown, needsMigration } from '../../src/lib/taskBreakdownMigration'
+import {
+  setActiveBreakdownItem
+} from '../../src/lib/breakdownHelpers'
+import type { TaskBreakdownItem } from '../../src/lib/taskBreakdownTypes'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -216,6 +222,7 @@ function initDataStorage() {
         },
         recordOffTaskWasted: true,
         featureFlags: { ...DEFAULT_FEATURE_FLAGS },
+        driveEnabledAspects: [...DEFAULT_DRIVE_ENABLED_ASPECTS],
         ...defaultWorkplaceSettings(),
         semanticSorter: { ...DEFAULT_SEMANTIC_SORTER_SETTINGS }
       }
@@ -233,16 +240,73 @@ function writeData(data: any) {
   fs.writeFileSync(dataPath, JSON.stringify(data, null, 2))
 }
 
+function syncCaptureDisplaySettings(data?: ReturnType<typeof readData>, persist = true) {
+  const d = data ?? readData()
+  d.settings = d.settings || {}
+  const displays = screen.getAllDisplays()
+  const count = displays.length
+  const lastCount = d.settings.lastKnownDisplayCount as number | undefined
+
+  if (typeof lastCount === 'number' && lastCount !== count) {
+    delete d.settings.captureDisplayId
+  }
+  d.settings.lastKnownDisplayCount = count
+
+  const stored = d.settings.captureDisplayId as number | undefined
+  if (stored != null && !displays.some((disp) => disp.id === stored)) {
+    delete d.settings.captureDisplayId
+  }
+
+  if (persist) writeData(d)
+  return d
+}
+
+function resolveCaptureDisplayId(): number {
+  const displays = screen.getAllDisplays()
+  const stored = readData().settings?.captureDisplayId as number | undefined
+  if (stored != null && displays.some((d) => d.id === stored)) return stored
+  return screen.getPrimaryDisplay().id
+}
+
+function getCaptureDisplayState() {
+  const data = readData()
+  const displays = screen.getAllDisplays()
+  const stored = data.settings?.captureDisplayId as number | undefined
+  const validStored = stored != null && displays.some((d) => d.id === stored) ? stored : null
+  const primaryId = screen.getPrimaryDisplay().id
+  const index = validStored != null ? displays.findIndex((d) => d.id === validStored) : -1
+  const label =
+    validStored != null && index >= 0
+      ? `Display ${index + 1}${validStored === primaryId ? ' (Primary)' : ''}`
+      : null
+
+  return {
+    displayId: validStored,
+    displayCount: displays.length,
+    needsSelection: displays.length > 1 && validStored == null,
+    label
+  }
+}
+
 function migratePersistedData() {
   const data = readData()
-  data.tasks = migrateAllTaskTimes(data.tasks || []).map((task: TaskWithWorkspaces) =>
-    normalizeTaskWorkspaces(task)
-  )
+  data.tasks = migrateAllTaskTimes(data.tasks || [])
+    .map((task: TaskWithWorkspaces) => normalizeTaskWorkspaces(task))
+    .map((task: Record<string, unknown>) => {
+      if (needsMigration(task as Parameters<typeof needsMigration>[0])) {
+        return migrateTaskToBreakdown(task as Parameters<typeof migrateTaskToBreakdown>[0])
+      }
+      return task
+    })
   data.settings = data.settings || {}
   data.settings.featureFlags = mergeFeatureFlags(data.settings.featureFlags)
   if (!data.settings.semanticSorter) {
     data.settings.semanticSorter = { ...DEFAULT_SEMANTIC_SORTER_SETTINGS }
   }
+  if (!Array.isArray(data.settings.driveEnabledAspects) || !data.settings.driveEnabledAspects.length) {
+    data.settings.driveEnabledAspects = [...DEFAULT_DRIVE_ENABLED_ASPECTS]
+  }
+  syncCaptureDisplaySettings(data, false)
   writeData(data)
 }
 
@@ -506,14 +570,34 @@ async function ensureScreenPermission(promptIfNeeded = true): Promise<boolean> {
   return result.granted || getScreenPermissionStatus() === 'granted'
 }
 
+function resolveBreakdownForTask(task: Record<string, unknown>): TaskBreakdownItem[] {
+  if (Array.isArray(task.task_breakdown) && task.task_breakdown.length > 0) {
+    return task.task_breakdown as TaskBreakdownItem[]
+  }
+  if (needsMigration(task as Parameters<typeof needsMigration>[0])) {
+    return migrateTaskToBreakdown(task as Parameters<typeof migrateTaskToBreakdown>[0]).task_breakdown ?? []
+  }
+  return []
+}
+
 function taskFocusContext(task: {
   title: string
   description?: string
+  task_breakdown?: TaskBreakdownItem[]
   subtasks?: unknown[]
   active_subtask_id?: string | null
   work_phase?: string
 }) {
-  return taskSubtaskContextFromTask(task as Parameters<typeof taskSubtaskContextFromTask>[0])
+  const breakdown = task.task_breakdown?.length
+    ? task.task_breakdown
+    : resolveBreakdownForTask(task as Record<string, unknown>)
+  return taskSubtaskContextFromTask({
+    title: task.title,
+    description: task.description,
+    task_breakdown: breakdown,
+    active_subtask_id: task.active_subtask_id,
+    work_phase: task.work_phase
+  })
 }
 
 function persistFocusCheckResult(
@@ -1371,8 +1455,19 @@ function setupIpcHandlers() {
     const data = readData()
     const task = data.tasks.find((t: { id: string }) => t.id === taskId)
     if (!task) throw new Error('Task not found')
-    const subtask = (task.subtasks ?? []).find((s: { id: string }) => s.id === subtaskId)
-    if (!subtask) throw new Error('Subtask not found')
+    const breakdown = resolveBreakdownForTask(task)
+    const item = breakdown.find((i: TaskBreakdownItem) => i.id === subtaskId)
+    if (!item?.technical) throw new Error('Breakdown item not found')
+
+    const subtask = {
+      id: item.id,
+      title: item.title,
+      input: item.technical.input,
+      output: item.technical.output,
+      transformation: item.technical.transformation,
+      outcome: item.technical.outcome,
+      ai_estimate_minutes: item.ai_estimate_minutes
+    }
 
     const result = await estimateSubtaskMinutes(
       getOllamaModel(),
@@ -1382,11 +1477,15 @@ function setupIpcHandlers() {
     )
 
     const idx = data.tasks.findIndex((t: { id: string }) => t.id === taskId)
-    const subIdx = (data.tasks[idx].subtasks ?? []).findIndex((s: { id: string }) => s.id === subtaskId)
-    if (idx !== -1 && subIdx !== -1) {
-      const subtasks = [...(data.tasks[idx].subtasks ?? [])]
-      subtasks[subIdx] = { ...subtasks[subIdx], ai_estimate_minutes: result.estimate }
-      data.tasks[idx] = { ...data.tasks[idx], subtasks, updated_at: new Date().toISOString() }
+    const itemIdx = breakdown.findIndex((i: TaskBreakdownItem) => i.id === subtaskId)
+    if (idx !== -1 && itemIdx !== -1) {
+      const nextBreakdown = [...breakdown]
+      nextBreakdown[itemIdx] = { ...nextBreakdown[itemIdx], ai_estimate_minutes: result.estimate }
+      data.tasks[idx] = {
+        ...data.tasks[idx],
+        task_breakdown: nextBreakdown,
+        updated_at: new Date().toISOString()
+      }
       writeData(data)
     }
 
@@ -1469,38 +1568,57 @@ Respond with JSON: {"suggestions": ["..."], "improvements": ["more clear", ...]}
       if (!entry || !step) throw new Error('SME step not found')
 
       const { v4: uuidv4 } = await import('uuid')
-      const subtaskId = uuidv4()
+      const itemId = uuidv4()
       const rationale = step.rationale?.trim() || step.title
-      const subtask = {
-        id: subtaskId,
+      const breakdownItem: TaskBreakdownItem = {
+        id: itemId,
         title: step.title.trim(),
-        input: '',
-        output: step.title.trim(),
-        transformation: rationale,
-        outcome: rationale,
+        type: 'technical',
         status: 'pending',
         created_at: new Date().toISOString(),
         source: 'ai_sme',
-        sme_validation_id: entryId
+        sme_validation_id: entryId,
+        order: resolveBreakdownForTask(task).length,
+        technical: {
+          input: '',
+          output: step.title.trim(),
+          transformation: rationale,
+          outcome: rationale
+        }
       }
 
       const nextValidations = validations.map((e) =>
         e.id === entryId
           ? {
               ...e,
-              promoted_subtask_ids: [...(e.promoted_subtask_ids ?? []), subtaskId]
+              promoted_subtask_ids: [...(e.promoted_subtask_ids ?? []), itemId]
             }
           : e
       )
 
+      const existingBreakdown = resolveBreakdownForTask(task)
       data.tasks[taskIndex] = {
         ...task,
-        subtasks: [...((task.subtasks as unknown[]) ?? []), subtask],
+        task_breakdown: [...existingBreakdown, breakdownItem],
         sme_validations: nextValidations,
         updated_at: new Date().toISOString()
       }
       writeData(data)
-      return { subtask, task: data.tasks[taskIndex] }
+      return {
+        subtask: {
+          id: itemId,
+          title: breakdownItem.title,
+          input: '',
+          output: breakdownItem.technical!.output,
+          transformation: breakdownItem.technical!.transformation,
+          outcome: breakdownItem.technical!.outcome,
+          status: 'pending',
+          created_at: breakdownItem.created_at,
+          source: 'ai_sme',
+          sme_validation_id: entryId
+        },
+        task: data.tasks[taskIndex]
+      }
     }
   )
 
@@ -1812,7 +1930,7 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
           task: {
             title: task.title,
             description: task.description,
-            subtasks: task.subtasks,
+            task_breakdown: resolveBreakdownForTask(task),
             active_subtask_id: task.active_subtask_id,
             work_phase: task.work_phase
           },
@@ -1883,19 +2001,17 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
       if (taskIndex === -1) throw new Error('Task not found')
 
       const task = data.tasks[taskIndex]
-      const subtasks = (task.subtasks ?? []).map((st: { id: string; status?: string }) => ({
-        ...st,
-        status:
-          st.id === subtaskId
-            ? 'active'
-            : st.status === 'active'
-              ? 'pending'
-              : st.status ?? 'pending'
-      }))
+      const breakdown = resolveBreakdownForTask(task)
+      const updatedBreakdown = subtaskId
+        ? setActiveBreakdownItem(breakdown, subtaskId)
+        : breakdown.map((item: TaskBreakdownItem) => ({
+            ...item,
+            status: item.status === 'active' ? 'pending' : item.status
+          }))
 
       data.tasks[taskIndex] = {
         ...task,
-        subtasks,
+        task_breakdown: updatedBreakdown,
         active_subtask_id: subtaskId,
         updated_at: new Date().toISOString()
       }
@@ -2100,7 +2216,7 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
 
   ipcMain.handle('capture-screen', async () => {
     try {
-      return await captureScreen()
+      return await captureScreen(resolveCaptureDisplayId())
     } catch (error: any) {
       console.error('Screen capture error:', error)
       throw error
@@ -2109,11 +2225,40 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
 
   ipcMain.handle('capture-screen-base64', async () => {
     try {
-      return await captureScreenBase64()
+      return await captureScreenBase64(resolveCaptureDisplayId())
     } catch (error: any) {
       console.error('Screen capture base64 error:', error)
       throw error
     }
+  })
+
+  ipcMain.handle('list-capture-displays', async () => {
+    try {
+      return await listCaptureDisplays()
+    } catch (error: any) {
+      console.error('List capture displays error:', error)
+      return []
+    }
+  })
+
+  ipcMain.handle('get-capture-display', async () => {
+    syncCaptureDisplaySettings()
+    return getCaptureDisplayState()
+  })
+
+  ipcMain.handle('set-capture-display', async (_: unknown, displayId: number) => {
+    const data = readData()
+    const displays = screen.getAllDisplays()
+    if (!displays.some((d) => d.id === displayId)) {
+      throw new Error('Display not found')
+    }
+    data.settings = {
+      ...data.settings,
+      captureDisplayId: displayId,
+      lastKnownDisplayCount: displays.length
+    }
+    writeData(data)
+    return getCaptureDisplayState()
   })
 
   ipcMain.handle('get-recent-screenshots', async (_: any, limit: number = 10) => {
@@ -2439,6 +2584,8 @@ app.whenReady().then(async () => {
 
   const bootData = readData()
   configurePomodoro(getPomodoroSettingsFromData(bootData))
+  setCaptureDisplayResolver(() => resolveCaptureDisplayId())
+  syncCaptureDisplaySettings()
 
   setupIpcHandlers()
   createWindow()

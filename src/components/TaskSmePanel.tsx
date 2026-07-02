@@ -9,6 +9,7 @@ import {
   formatSmeTimelineLabel
 } from '../lib/smeValidation'
 import { promoteSmeStepToSubtask, validateSmeForTask } from '../lib/electron-api'
+import { resolveTaskBreakdown } from '../lib/breakdownHelpers'
 
 interface TaskSmePanelProps {
   task: Task
@@ -81,7 +82,7 @@ export default function TaskSmePanel({ task, onUpdate, fullWidth = false }: Task
       const result = await promoteSmeStepToSubtask(task.id, entryId, stepIndex)
       const updated = result.task as Task
       await onUpdate({
-        subtasks: updated.subtasks,
+        task_breakdown: updated.task_breakdown,
         sme_validations: updated.sme_validations
       })
     } catch (err) {
@@ -93,15 +94,17 @@ export default function TaskSmePanel({ task, onUpdate, fullWidth = false }: Task
 
   const isStepPromoted = (entry: SmeValidationEntry, stepIndex: number): boolean => {
     const ids = entry.promoted_subtask_ids ?? []
-    const subtasks = task.subtasks ?? []
+    const breakdown = resolveTaskBreakdown(task)
     const step = entry.recommended_steps?.[stepIndex]
     if (!step) return false
-    return subtasks.some(
-      (st) =>
-        st.source === 'ai_sme' &&
-        st.sme_validation_id === entry.id &&
-        st.title === step.title
-    ) || ids.length > stepIndex
+    return (
+      breakdown.some(
+        (item) =>
+          item.source === 'ai_sme' &&
+          item.sme_validation_id === entry.id &&
+          item.title === step.title
+      ) || ids.length > stepIndex
+    )
   }
 
   const panelClass = fullWidth

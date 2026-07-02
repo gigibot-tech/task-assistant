@@ -3,7 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { toAppFileUrl } from '../../src/shared/appFileUrl'
 
 contextBridge.exposeInMainWorld('electron', {
-  preloadVersion: 13,
+  preloadVersion: 14,
   getAppFileUrl: (filePath: string) => toAppFileUrl(filePath),
   getTasks: () => ipcRenderer.invoke('get-tasks'),
   createTask: (task: any) => ipcRenderer.invoke('create-task', task),
@@ -51,6 +51,9 @@ contextBridge.exposeInMainWorld('electron', {
 
   captureScreen: () => ipcRenderer.invoke('capture-screen'),
   captureScreenBase64: () => ipcRenderer.invoke('capture-screen-base64'),
+  listCaptureDisplays: () => ipcRenderer.invoke('list-capture-displays'),
+  getCaptureDisplay: () => ipcRenderer.invoke('get-capture-display'),
+  setCaptureDisplay: (displayId: number) => ipcRenderer.invoke('set-capture-display', displayId),
   getRecentScreenshots: (limit?: number) => ipcRenderer.invoke('get-recent-screenshots', limit),
   cleanupScreenshots: () => ipcRenderer.invoke('cleanup-screenshots'),
   analyzeScreenshotForTask: (taskId: string, screenshotPath: string) =>
@@ -104,7 +107,11 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('semantic-sorter-update-settings', partial),
 
   onNotification: (callback: (data: any) => void) => {
-    ipcRenderer.on('notification', (_, data) => callback(data))
+    const handler = (_: unknown, data: unknown) => callback(data)
+    ipcRenderer.on('notification', handler)
+    return () => {
+      ipcRenderer.removeListener('notification', handler)
+    }
   }
 })
 
@@ -242,6 +249,26 @@ export interface ElectronAPI {
   openNotificationSettings: () => Promise<{ opened: boolean }>
   captureScreen: () => Promise<{ imagePath: string; timestamp: string; displayId: number }>
   captureScreenBase64: () => Promise<string>
+  listCaptureDisplays: () => Promise<Array<{
+    id: number
+    label: string
+    width: number
+    height: number
+    isPrimary: boolean
+    thumbnailDataUrl: string
+  }>>
+  getCaptureDisplay: () => Promise<{
+    displayId: number | null
+    displayCount: number
+    needsSelection: boolean
+    label: string | null
+  }>
+  setCaptureDisplay: (displayId: number) => Promise<{
+    displayId: number | null
+    displayCount: number
+    needsSelection: boolean
+    label: string | null
+  }>
   getRecentScreenshots: (limit?: number) => Promise<Array<{ imagePath: string; timestamp: string; displayId: number }>>
   cleanupScreenshots: () => Promise<{ success: boolean }>
   analyzeScreenshotForTask: (taskId: string, screenshotPath: string) => Promise<{
@@ -377,7 +404,7 @@ export interface ElectronAPI {
   semanticSorterPickFolder: () => Promise<{ path: string | null }>
   semanticSorterGetSettings: () => Promise<Record<string, unknown>>
   semanticSorterUpdateSettings: (partial: Record<string, unknown>) => Promise<Record<string, unknown>>
-  onNotification: (callback: (data: any) => void) => void
+  onNotification: (callback: (data: any) => void) => () => void
 }
 
 declare global {

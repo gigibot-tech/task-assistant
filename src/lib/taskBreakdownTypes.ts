@@ -8,13 +8,21 @@
  * Into a single, progressive disclosure model.
  */
 
-import type { SoftwarePhase } from './subtaskTypes'
+import type { ExtractionChecks, SoftwarePhase } from './subtaskTypes'
 
 export type TaskBreakdownItemType = 'simple' | 'technical'
 
 export type TaskBreakdownStatus = 'pending' | 'active' | 'done' | 'blocked'
 
-export type TaskBreakdownSource = 'user' | 'ai_probe' | 'ai_suggestion' | 'migrated_checklist' | 'migrated_subtask' | 'prime_day' | 'stuck'
+export type TaskBreakdownSource =
+  | 'user'
+  | 'ai_probe'
+  | 'ai_suggestion'
+  | 'migrated_checklist'
+  | 'migrated_subtask'
+  | 'prime_day'
+  | 'stuck'
+  | 'ai_sme'
 
 /**
  * Technical details for complex work items
@@ -58,6 +66,11 @@ export interface TaskBreakdownItem {
   
   // Optional: Display order
   order?: number
+
+  // Optional: SME promotion metadata
+  sme_validation_id?: string
+  extraction_of_subtask_id?: string
+  extraction_checks?: ExtractionChecks
 }
 
 /**
@@ -96,6 +109,9 @@ export function migrateSubtask(
     ai_estimate_minutes?: number
     source: string
     phase?: SoftwarePhase
+    sme_validation_id?: string
+    extraction_of_subtask_id?: string
+    extraction_checks?: ExtractionChecks
   },
   order: number
 ): TaskBreakdownItem {
@@ -105,7 +121,7 @@ export function migrateSubtask(
     type: 'technical',
     status: subtask.status,
     created_at: subtask.created_at,
-    source: 'migrated_subtask',
+    source: subtask.source === 'ai_sme' ? 'ai_sme' : 'migrated_subtask',
     technical: {
       input: subtask.input,
       output: subtask.output,
@@ -116,6 +132,9 @@ export function migrateSubtask(
     },
     ai_estimate_minutes: subtask.ai_estimate_minutes,
     phase: subtask.phase,
+    sme_validation_id: subtask.sme_validation_id,
+    extraction_of_subtask_id: subtask.extraction_of_subtask_id,
+    extraction_checks: subtask.extraction_checks,
     order
   }
 }

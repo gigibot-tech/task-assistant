@@ -1,51 +1,84 @@
 import { useState } from 'react'
+import { v4 as uuidv4 } from 'uuid'
 import type { Task } from '../store/taskStore'
 import type { TaskBreakdownItem } from '../lib/taskBreakdownTypes'
-import { getTaskBreakdown } from '../lib/taskBreakdownMigration'
-import { calculateProgress, formatIot } from '../lib/taskBreakdownTypes'
+import { calculateProgress, formatIot, isTechnicalComplete } from '../lib/taskBreakdownTypes'
+import {
+  isBreakdownItemReady,
+  resolveTaskBreakdown,
+  setActiveBreakdownItem
+} from '../lib/breakdownHelpers'
 import { estimateSubtaskTime, subtaskHasEstimateContext } from '../lib/taskEstimate'
 import { buildOutcome } from '../lib/subtaskTypes'
-import SubtaskProbeModal from './SubtaskProbeModal'
+import { setActiveSubtask } from '../lib/electron-api'
+import { clampProgressPercent } from '../lib/progressMilestones'
+import { isFeatureEnabled, type FeatureFlags } from '../features/types'
+import type { OpenProbeHandler } from '../features/manifests'
 
 interface TaskBreakdownPanelProps {
   task: Task
-  onUpdate: (updates: Partial<Task>) => void
+  flags?: FeatureFlags
+  onUpdate: (updates: Partial<Task>) => void | Promise<void>
   onStuck?: () => void
+  onOpenProbe?: OpenProbeHandler
 }
 
-export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBreakdownPanelProps) {
-  const [isAddingNew, setIsAddingNew] = useState(false)
+export default function TaskBreakdownPanel({
+  task,
+  flags,
+  onUpdate,
+  onStuck,
+  onOpenProbe
+}: TaskBreakdownPanelProps) {
+  const [addMode, setAddMode] = useState<'simple' | 'technical' | null>(null)
   const [newItemTitle, setNewItemTitle] = useState('')
-  const [showProbe, setShowProbe] = useState(false)
+  const [newInput, setNewInput] = useState('')
+  const [newOutput, setNewOutput] = useState('')
+  const [newTransformation, setNewTransformation] = useState('')
   const [estimatingId, setEstimatingId] = useState<string | null>(null)
   const [estimateError, setEstimateError] = useState<string | null>(null)
+  const [editingTechnicalId, setEditingTechnicalId] = useState<string | null>(null)
 
-  // Get breakdown items (migrated if necessary)
-  const items = getTaskBreakdown(task)
+  const items = resolveTaskBreakdown(task)
   const progress = calculateProgress(items)
+  const probeEnabled = !flags || isFeatureEnabled(flags, 'subtaskProbe')
+
+  const persistBreakdown = async (
+    updatedItems: TaskBreakdownItem[],
+    extra?: Partial<Task>
+  ) => {
+    const nextProgress =
+      updatedItems.length > 0 ? clampProgressPercent(calculateProgress(updatedItems)) : undefined
+    await onUpdate({
+      task_breakdown: updatedItems,
+      ...(nextProgress != null ? { progress_percent: nextProgress } : {}),
+      ...extra
+    })
+  }
 
   const handleToggleStatus = (item: TaskBreakdownItem) => {
-    const updatedItems = items.map(i =>
+    const updatedItems = items.map((i) =>
       i.id === item.id
-        ? { ...i, status: (i.status === 'done' ? 'pending' : 'done') as TaskBreakdownItem['status'] }
+        ? {
+            ...i,
+            status: (i.status === 'done' ? 'pending' : 'done') as TaskBreakdownItem['status']
+          }
         : i
     )
-    onUpdate({ task_breakdown: updatedItems })
+    void persistBreakdown(updatedItems)
   }
 
-  const handleSetActive = (item: TaskBreakdownItem) => {
-    const updatedItems = items.map(i => ({
-      ...i,
-      status: (i.id === item.id ? 'active' : i.status === 'active' ? 'pending' : i.status) as TaskBreakdownItem['status']
-    }))
-    onUpdate({ task_breakdown: updatedItems })
+  const handleSetActive = async (item: TaskBreakdownItem) => {
+    if (!isBreakdownItemReady(item)) return
+    await setActiveSubtask(task.id, item.id)
+    const updatedItems = setActiveBreakdownItem(items, item.id)
+    await persistBreakdown(updatedItems, { active_subtask_id: item.id })
   }
 
-  const handleAddItem = () => {
+  const handleAddSimple = () => {
     if (!newItemTitle.trim()) return
-
     const newItem: TaskBreakdownItem = {
-      id: `item-${Date.now()}`,
+      id: uuidv4(),
       title: newItemTitle.trim(),
       type: 'simple',
       status: 'pending',
@@ -53,29 +86,91 @@ export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBrea
       source: 'user',
       order: items.length
     }
-
-    onUpdate({ task_breakdown: [...items, newItem] })
+    void persistBreakdown([...items, newItem])
     setNewItemTitle('')
-    setIsAddingNew(false)
+    setAddMode(null)
+  }
+
+  const handleAddTechnical = () => {
+    if (!newItemTitle.trim()) return
+    const input = newInput.trim()
+    const output = newOutput.trim()
+    const transformation = newTransformation.trim()
+    const newItem: TaskBreakdownItem = {
+      id: uuidv4(),
+      title: newItemTitle.trim(),
+      type: 'technical',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      source: 'user',
+      order: items.length,
+      technical: {
+        input,
+        output,
+        transformation,
+        outcome: buildOutcome(input, output, transformation)
+      }
+    }
+    void persistBreakdown([...items, newItem])
+    setNewItemTitle('')
+    setNewInput('')
+    setNewOutput('')
+    setNewTransformation('')
+    setAddMode(null)
+  }
+
+  const handleMakeTechnical = (item: TaskBreakdownItem) => {
+    setEditingTechnicalId(item.id)
+  }
+
+  const handleSaveTechnicalUpgrade = (itemId: string) => {
+    const input = newInput.trim()
+    const output = newOutput.trim()
+    const transformation = newTransformation.trim()
+    if (!input || !output || !transformation) return
+
+    const updatedItems = items.map((i) =>
+      i.id === itemId
+        ? {
+            ...i,
+            type: 'technical' as const,
+            technical: {
+              input,
+              output,
+              transformation,
+              outcome: buildOutcome(input, output, transformation)
+            }
+          }
+        : i
+    )
+    void persistBreakdown(updatedItems)
+    setEditingTechnicalId(null)
+    setNewInput('')
+    setNewOutput('')
+    setNewTransformation('')
   }
 
   const handleValidationToggle = (item: TaskBreakdownItem) => {
     if (item.type !== 'technical' || !item.technical) return
-    
-    const updatedItems = items.map(i =>
+
+    const updatedItems = items.map((i) =>
       i.id === item.id && i.technical
         ? {
             ...i,
             technical: {
               ...i.technical,
               validated_with_real_input: !i.technical.validated_with_real_input,
-              validated_at: !i.technical.validated_with_real_input ? new Date().toISOString() : undefined
+              validated_at: !i.technical.validated_with_real_input
+                ? new Date().toISOString()
+                : undefined
             },
-            status: (!i.technical.validated_with_real_input ? 'done' : i.status) as TaskBreakdownItem['status']
+            status: (!i.technical.validated_with_real_input
+              ? 'done'
+              : i.status) as TaskBreakdownItem['status']
           }
         : i
     )
-    onUpdate({ task_breakdown: updatedItems })
+    void persistBreakdown(updatedItems)
   }
 
   const runItemEstimate = async (itemId: string) => {
@@ -83,10 +178,10 @@ export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBrea
     setEstimateError(null)
     try {
       const result = await estimateSubtaskTime(task.id, itemId)
-      const updatedItems = items.map(i =>
+      const updatedItems = items.map((i) =>
         i.id === itemId ? { ...i, ai_estimate_minutes: result.estimate } : i
       )
-      onUpdate({ task_breakdown: updatedItems })
+      await persistBreakdown(updatedItems)
     } catch (err) {
       setEstimateError(err instanceof Error ? err.message : 'Estimate failed')
     } finally {
@@ -109,40 +204,52 @@ export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBrea
     }
   }
 
-  const getTypeLabel = (type: TaskBreakdownItem['type']) => {
-    return type === 'technical' ? 'tech' : 'simple'
+  const smeTitle = (item: TaskBreakdownItem) => {
+    if (item.source !== 'ai_sme' || !item.sme_validation_id) return 'From SME expert recommendation'
+    const validation = task.sme_validations?.find((v) => v.id === item.sme_validation_id)
+    return validation?.recorded_at
+      ? `From SME validation ${new Date(validation.recorded_at).toLocaleDateString()}`
+      : 'From SME expert recommendation'
   }
 
   return (
     <>
       <div className="bg-gray-800 rounded-lg p-3 border border-gray-600/80">
-        {/* Header */}
         <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
           <div className="flex items-center gap-2">
             <h3 className="text-xs text-gray-500 uppercase tracking-wide">Task Breakdown</h3>
             {items.length > 0 && (
               <span className="text-xs text-gray-400">
-                ({items.filter(i => i.status === 'done').length}/{items.length} complete)
+                ({items.filter((i) => i.status === 'done').length}/{items.length} complete)
               </span>
             )}
           </div>
           <div className="flex gap-2">
+            {probeEnabled && onOpenProbe && (
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenProbe('manual')
+                  onStuck?.()
+                }}
+                className="text-xs px-2 py-1 bg-orange-900/60 hover:bg-orange-800/80 border border-orange-700/50 rounded text-orange-100"
+              >
+                I&apos;m stuck
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => {
-                setShowProbe(true)
-                onStuck?.()
-              }}
-              className="text-xs px-2 py-1 bg-orange-900/60 hover:bg-orange-800/80 border border-orange-700/50 rounded text-orange-100"
-            >
-              I'm stuck
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsAddingNew(true)}
+              onClick={() => setAddMode('simple')}
               className="text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
             >
               + Add
+            </button>
+            <button
+              type="button"
+              onClick={() => setAddMode('technical')}
+              className="text-xs px-2 py-1 bg-violet-900/50 hover:bg-violet-800/70 border border-violet-700/50 rounded text-violet-100"
+            >
+              + Technical
             </button>
           </div>
         </div>
@@ -153,7 +260,6 @@ export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBrea
           </p>
         )}
 
-        {/* Progress Bar */}
         {items.length > 0 && (
           <div className="mb-3">
             <div className="w-full bg-gray-700 rounded-full h-2">
@@ -165,34 +271,33 @@ export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBrea
           </div>
         )}
 
-        {/* Add New Item Form */}
-        {isAddingNew && (
+        {addMode === 'simple' && (
           <div className="mb-3 p-2 bg-gray-700/50 rounded border border-gray-600">
             <input
               type="text"
               value={newItemTitle}
               onChange={(e) => setNewItemTitle(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') handleAddItem()
+                if (e.key === 'Enter') handleAddSimple()
                 if (e.key === 'Escape') {
-                  setIsAddingNew(false)
+                  setAddMode(null)
                   setNewItemTitle('')
                 }
               }}
-              placeholder="Enter item title..."
+              placeholder="Enter step title..."
               className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-sm"
               autoFocus
             />
             <div className="flex gap-2 mt-2">
               <button
-                onClick={handleAddItem}
+                onClick={handleAddSimple}
                 className="text-xs px-2 py-1 bg-violet-800 hover:bg-violet-700 rounded text-white"
               >
                 Add
               </button>
               <button
                 onClick={() => {
-                  setIsAddingNew(false)
+                  setAddMode(null)
                   setNewItemTitle('')
                 }}
                 className="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-500 rounded text-white"
@@ -203,20 +308,73 @@ export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBrea
           </div>
         )}
 
-        {/* Items List */}
-        {items.length === 0 && !isAddingNew ? (
+        {addMode === 'technical' && (
+          <div className="mb-3 p-2 bg-gray-700/50 rounded border border-gray-600 space-y-2">
+            <input
+              value={newItemTitle}
+              onChange={(e) => setNewItemTitle(e.target.value)}
+              placeholder="Title"
+              className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-sm"
+              autoFocus
+            />
+            <input
+              value={newInput}
+              onChange={(e) => setNewInput(e.target.value)}
+              placeholder="Input"
+              className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-sm"
+            />
+            <input
+              value={newOutput}
+              onChange={(e) => setNewOutput(e.target.value)}
+              placeholder="Output"
+              className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-sm"
+            />
+            <input
+              value={newTransformation}
+              onChange={(e) => setNewTransformation(e.target.value)}
+              placeholder="Transformation"
+              className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-sm"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={handleAddTechnical}
+                className="text-xs px-2 py-1 bg-violet-800 hover:bg-violet-700 rounded text-white"
+              >
+                Save
+              </button>
+              <button
+                onClick={() => {
+                  setAddMode(null)
+                  setNewItemTitle('')
+                  setNewInput('')
+                  setNewOutput('')
+                  setNewTransformation('')
+                }}
+                className="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-500 rounded text-white"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {items.length === 0 && !addMode ? (
           <p className="text-xs text-gray-600">No breakdown items yet. Add one or run a probe.</p>
         ) : (
           <ul className="space-y-2">
             {items.map((item) => {
               const isActive = item.status === 'active'
-              const canEstimate = item.type === 'technical' && item.technical && 
-                                 subtaskHasEstimateContext({ 
-                                   input: item.technical.input, 
-                                   output: item.technical.output, 
-                                   transformation: item.technical.transformation 
-                                 } as any)
-              
+              const ready = isBreakdownItemReady(item)
+              const canEstimate =
+                item.type === 'technical' &&
+                item.technical &&
+                subtaskHasEstimateContext({
+                  title: item.title,
+                  input: item.technical.input,
+                  output: item.technical.output,
+                  transformation: item.technical.transformation
+                } as import('../lib/subtaskTypes').TaskSubtask)
+
               return (
                 <li
                   key={item.id}
@@ -238,9 +396,21 @@ export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBrea
                             {getStatusIcon(item.status)}
                           </button>
                           <div className="min-w-0 flex-1">
-                            <span className={`font-medium ${item.status === 'done' ? 'line-through text-gray-500' : 'text-gray-200'}`}>
+                            <span
+                              className={`font-medium ${
+                                item.status === 'done' ? 'line-through text-gray-500' : 'text-gray-200'
+                              }`}
+                            >
                               {item.title}
                             </span>
+                            {item.source === 'ai_sme' && (
+                              <span
+                                className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-indigo-900/50 text-indigo-200"
+                                title={smeTitle(item)}
+                              >
+                                SME
+                              </span>
+                            )}
                             <span
                               className={`ml-2 px-1.5 py-0.5 rounded text-[10px] uppercase ${
                                 item.type === 'technical'
@@ -248,7 +418,7 @@ export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBrea
                                   : 'bg-gray-700 text-gray-400'
                               }`}
                             >
-                              {getTypeLabel(item.type)}
+                              {item.type === 'technical' ? 'tech' : 'simple'}
                             </span>
                             {item.type === 'technical' && item.technical && (
                               <p className="text-gray-500 mt-1 text-[11px] font-mono">
@@ -271,36 +441,115 @@ export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBrea
                             disabled={estimatingId === item.id}
                             className="px-2 py-0.5 bg-indigo-900/50 hover:bg-indigo-800/70 disabled:opacity-40 rounded text-[10px] text-indigo-100"
                           >
-                            {estimatingId === item.id ? '…' : item.ai_estimate_minutes ? 'Re-est' : 'Est'}
+                            {estimatingId === item.id
+                              ? '…'
+                              : item.ai_estimate_minutes
+                                ? 'Re-est'
+                                : 'Est'}
+                          </button>
+                        )}
+                        {item.type === 'simple' && editingTechnicalId !== item.id && (
+                          <button
+                            type="button"
+                            onClick={() => handleMakeTechnical(item)}
+                            className="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-[10px] text-gray-300"
+                          >
+                            Make technical
                           </button>
                         )}
                         {!isActive && item.status !== 'done' && (
                           <button
                             type="button"
-                            onClick={() => handleSetActive(item)}
-                            className="px-2 py-0.5 bg-violet-800 hover:bg-violet-700 rounded text-[10px] text-white"
+                            disabled={!ready}
+                            title={
+                              ready
+                                ? 'Set active'
+                                : item.type === 'technical'
+                                  ? 'Fill input, output, transformation first'
+                                  : 'Set active'
+                            }
+                            onClick={() => void handleSetActive(item)}
+                            className="px-2 py-0.5 bg-violet-800 hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed rounded text-[10px] text-white"
                           >
                             Set active
                           </button>
                         )}
                       </div>
                     </div>
-                    
-                    {item.type === 'technical' && item.technical && (item.status === 'done' || item.status === 'active') && (
-                      <div className="pl-2 border-l-2 border-gray-700">
-                        <label className="flex items-center gap-2 text-[11px] cursor-pointer hover:text-gray-300 transition-colors">
-                          <input
-                            type="checkbox"
-                            checked={!!item.technical.validated_with_real_input}
-                            onChange={() => handleValidationToggle(item)}
-                            className="w-3.5 h-3.5 rounded border-gray-600 text-green-600 focus:ring-green-500 focus:ring-offset-gray-900"
-                          />
-                          <span className={item.technical.validated_with_real_input ? 'text-green-300' : 'text-gray-400'}>
-                            Tested w/ real input
-                          </span>
-                        </label>
+
+                    {editingTechnicalId === item.id && (
+                      <div className="pl-2 border-l-2 border-violet-700 space-y-2">
+                        <input
+                          value={newInput}
+                          onChange={(e) => setNewInput(e.target.value)}
+                          placeholder="Input"
+                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm"
+                        />
+                        <input
+                          value={newOutput}
+                          onChange={(e) => setNewOutput(e.target.value)}
+                          placeholder="Output"
+                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm"
+                        />
+                        <input
+                          value={newTransformation}
+                          onChange={(e) => setNewTransformation(e.target.value)}
+                          placeholder="Transformation"
+                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm"
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleSaveTechnicalUpgrade(item.id)}
+                            disabled={!isTechnicalComplete({
+                              input: newInput,
+                              output: newOutput,
+                              transformation: newTransformation,
+                              outcome: ''
+                            })}
+                            className="px-2 py-0.5 bg-violet-800 hover:bg-violet-700 disabled:opacity-40 rounded text-[10px] text-white"
+                          >
+                            Save IOT
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingTechnicalId(null)
+                              setNewInput('')
+                              setNewOutput('')
+                              setNewTransformation('')
+                            }}
+                            className="px-2 py-0.5 bg-gray-600 hover:bg-gray-500 rounded text-[10px] text-white"
+                          >
+                            Cancel
+                          </button>
+                        </div>
                       </div>
                     )}
+
+                    {item.type === 'technical' &&
+                      item.technical &&
+                      (item.status === 'done' || item.status === 'active') && (
+                        <div className="pl-2 border-l-2 border-gray-700">
+                          <label className="flex items-center gap-2 text-[11px] cursor-pointer hover:text-gray-300 transition-colors">
+                            <input
+                              type="checkbox"
+                              checked={!!item.technical.validated_with_real_input}
+                              onChange={() => handleValidationToggle(item)}
+                              className="w-3.5 h-3.5 rounded border-gray-600 text-green-600 focus:ring-green-500 focus:ring-offset-gray-900"
+                            />
+                            <span
+                              className={
+                                item.technical.validated_with_real_input
+                                  ? 'text-green-300'
+                                  : 'text-gray-400'
+                              }
+                            >
+                              Tested w/ real input
+                            </span>
+                          </label>
+                        </div>
+                      )}
                   </div>
                 </li>
               )
@@ -308,62 +557,8 @@ export default function TaskBreakdownPanel({ task, onUpdate, onStuck }: TaskBrea
           </ul>
         )}
 
-        {estimateError && (
-          <p className="text-xs text-red-300 mt-2">{estimateError}</p>
-        )}
+        {estimateError && <p className="text-xs text-red-300 mt-2">{estimateError}</p>}
       </div>
-
-      {showProbe && (
-        <SubtaskProbeModal
-          taskId={task.id}
-          taskTitle={task.title}
-          trigger="manual"
-          existingSubtasks={task.subtasks ?? []}
-          onLater={() => setShowProbe(false)}
-          onAccept={async (updates) => {
-            // Convert subtasks to breakdown items and merge
-            const newBreakdownItems: TaskBreakdownItem[] = (updates.subtasks ?? []).map((st, idx) => ({
-              id: st.id,
-              title: st.title,
-              type: 'technical' as const,
-              status: st.status,
-              created_at: st.created_at,
-              source: st.source,
-              order: items.length + idx,
-              technical: {
-                input: st.input,
-                output: st.output,
-                transformation: st.transformation,
-                outcome: buildOutcome(st.input, st.output, st.transformation),
-                validated_with_real_input: st.validated_with_real_input,
-                validated_at: st.validated_at
-              },
-              ai_estimate_minutes: st.ai_estimate_minutes
-            }))
-            
-            const patch: Partial<Task> = {
-              task_breakdown: [...items, ...newBreakdownItems],
-              active_subtask_id: updates.active_subtask_id
-            }
-            
-            if (updates.probe_must_code_by) {
-              ;(patch as Task & { probe_must_code_by?: string }).probe_must_code_by =
-                updates.probe_must_code_by
-            }
-            
-            if (updates.drive_acknowledged_primes?.length) {
-              patch.drive_acknowledged_primes = [
-                ...new Set([...(task.drive_acknowledged_primes ?? []), ...updates.drive_acknowledged_primes])
-              ]
-            }
-            
-            await onUpdate(patch)
-            setShowProbe(false)
-          }}
-        />
-      )}
     </>
   )
 }
-
-// Made with Bob

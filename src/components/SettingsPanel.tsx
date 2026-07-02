@@ -1,12 +1,19 @@
 import { useState, useEffect } from 'react'
 import { DEFAULT_BAND_MINUTES, THINKING_BAND_LABELS, type ThinkingBand } from '../lib/subtaskTypes'
 import {
+  DRIVE_ASPECTS,
+  DRIVE_ASPECT_LABELS,
+  DEFAULT_DRIVE_ENABLED_ASPECTS,
+  type DriveAspect
+} from '../lib/taskDrive'
+import {
   DEFAULT_FEATURE_FLAGS,
   FEATURE_LABELS,
   mergeFeatureFlags,
   type FeatureFlags,
   type FeatureId
 } from '../features/types'
+import MonitorPicker from './MonitorPicker'
 
 interface PomodoroSettings {
   enabled: boolean
@@ -33,6 +40,7 @@ interface Settings {
   wastedBandMinutes?: Partial<Record<ThinkingBand, number>>
   recordOffTaskWasted?: boolean
   featureFlags?: FeatureFlags
+  driveEnabledAspects?: DriveAspect[]
 }
 
 const defaultPomodoro = (): PomodoroSettings => ({
@@ -165,6 +173,15 @@ export default function SettingsPanel({ onSettingsSaved }: { onSettingsSaved?: (
             <option value={30}>30 minutes</option>
             <option value={60}>60 minutes</option>
           </select>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium mb-2">Screen capture monitor</label>
+          <MonitorPicker />
+          <p className="text-xs text-gray-500 mt-1">
+            Used for deviation checks, monitoring, and focus history. Shown only when multiple displays
+            are connected.
+          </p>
         </div>
 
         <div>
@@ -356,6 +373,39 @@ export default function SettingsPanel({ onSettingsSaved }: { onSettingsSaved?: (
           <p className="text-xs text-gray-500">
             Ollama threshold: use Desktop Sorter panel toggles; feature flag above enables the nav item.
           </p>
+        </div>
+
+        <div className="pt-4 border-t border-gray-700 space-y-4">
+          <h3 className="text-lg font-semibold">Task drive</h3>
+          <p className="text-xs text-gray-500">
+            Which reflection aspects appear in Task Drive prompts and history.
+          </p>
+          <div className="space-y-2">
+            {DRIVE_ASPECTS.map((aspect) => {
+              const enabled = settings.driveEnabledAspects ?? DEFAULT_DRIVE_ENABLED_ASPECTS
+              const checked = enabled.includes(aspect)
+              return (
+                <label key={aspect} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      const current = settings.driveEnabledAspects ?? DEFAULT_DRIVE_ENABLED_ASPECTS
+                      const next = e.target.checked
+                        ? [...new Set([...current, aspect])]
+                        : current.filter((a) => a !== aspect)
+                      setSettings({
+                        ...settings,
+                        driveEnabledAspects:
+                          next.length > 0 ? next : DEFAULT_DRIVE_ENABLED_ASPECTS
+                      })
+                    }}
+                  />
+                  <span className="text-gray-200">{DRIVE_ASPECT_LABELS[aspect]}</span>
+                </label>
+              )
+            })}
+          </div>
         </div>
 
         <div className="pt-4 border-t border-gray-700 space-y-4">

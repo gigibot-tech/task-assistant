@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { v4 as uuidv4 } from 'uuid'
 import type { Task } from '../store/taskStore'
 import PrimeMilestonePrompt from './PrimeMilestonePrompt'
 import {
@@ -23,7 +22,6 @@ interface TaskProgressPanelProps {
 }
 
 export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelProps) {
-  const [newItem, setNewItem] = useState('')
   const [milestoneQueue, setMilestoneQueue] = useState<PrimeMilestone[]>([])
   const [draftProgress, setDraftProgress] = useState<number | null>(null)
   const [estimating, setEstimating] = useState(false)
@@ -31,7 +29,6 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
   const autoEstimateAttemptedRef = useRef(false)
   const progressBaselineRef = useRef(clampProgressPercent(task.progress_percent ?? 0))
 
-  const checklist = task.progress_checklist ?? []
   const milestoneUpdates = task.progress_milestone_updates ?? []
   const savedProgress = clampProgressPercent(task.progress_percent ?? 0)
   const currentProgress = draftProgress ?? savedProgress
@@ -87,24 +84,6 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
     }
   }
 
-  const syncChecklist = async (next: Task['progress_checklist']) => {
-    const before = progressBaselineRef.current
-    await onUpdate({ progress_checklist: next })
-
-    const done = next?.filter((i) => i.done).length ?? 0
-    const total = next?.length ?? 0
-    const after =
-      total > 0 ? clampProgressPercent(Math.round((done / total) * 100)) : before
-    const newlyCrossed = getNewlyCrossedPrimes(before, after)
-    progressBaselineRef.current = after
-
-    if (newlyCrossed.length > 0) {
-      setMilestoneQueue((prev) =>
-        getPendingMilestoneQueue(after, milestoneUpdates, [...newlyCrossed, ...prev])
-      )
-    }
-  }
-
   const acknowledgeMilestone = async (prime: number, note: string) => {
     const entry: ProgressMilestoneUpdate = {
       prime,
@@ -123,7 +102,6 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
 
   const handleMilestoneSkip = () => {
     if (!activePrime) return
-    // Just remove from queue without acknowledging - it will come back later
     setMilestoneQueue((prev) => prev.slice(1))
   }
 
@@ -133,25 +111,6 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
       if (prev.includes(nextPending)) return prev
       return [nextPending, ...prev]
     })
-  }
-
-  const addItem = async () => {
-    const label = newItem.trim()
-    if (!label || checklist.length >= 7) return
-    const next = [...checklist, { id: uuidv4(), label, done: false }]
-    setNewItem('')
-    await syncChecklist(next)
-  }
-
-  const toggleItem = async (id: string) => {
-    const next = checklist.map((item) =>
-      item.id === id ? { ...item, done: !item.done } : item
-    )
-    await syncChecklist(next)
-  }
-
-  const removeItem = async (id: string) => {
-    await syncChecklist(checklist.filter((item) => item.id !== id))
   }
 
   return (
@@ -173,6 +132,9 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
             onTouchEnd={(e) => void commitProgressChange(parseInt(e.currentTarget.value, 10))}
             className="w-full"
           />
+          <p className="text-xs text-gray-500 mt-2">
+            Add and complete steps in Task Breakdown below — or drag the slider to override.
+          </p>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
             {nextPending && !activePrime && (
               <button
@@ -196,6 +158,9 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
             <p className="text-xs text-gray-500 mt-1">
               Updated {new Date(task.progress_updated_at).toLocaleString()}
             </p>
+          )}
+          {estimateError && (
+            <p className="text-xs text-red-300 mt-1">{estimateError}</p>
           )}
         </div>
 
@@ -223,54 +188,6 @@ export default function TaskProgressPanel({ task, onUpdate }: TaskProgressPanelP
             </ul>
           </details>
         )}
-
-        <div className="bg-gray-800 rounded-lg p-3 border border-gray-600/80">
-          <span className="text-xs text-gray-500 uppercase tracking-wide">Checklist</span>
-          <p className="text-xs text-gray-500 mt-1 mb-2">
-            Checking items auto-updates progress % and may trigger check-ins at prime milestones.
-          </p>
-          <ul className="space-y-2 mb-2">
-            {checklist.map((item) => (
-              <li key={item.id} className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={item.done}
-                  onChange={() => toggleItem(item.id)}
-                />
-                <span className={item.done ? 'line-through text-gray-500 flex-1' : 'flex-1'}>
-                  {item.label}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => removeItem(item.id)}
-                  className="text-xs text-gray-500 hover:text-red-300"
-                >
-                  ✕
-                </button>
-              </li>
-            ))}
-          </ul>
-          {checklist.length < 7 && (
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={newItem}
-                onChange={(e) => setNewItem(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && addItem()}
-                placeholder="Add step…"
-                className="flex-1 px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-sm"
-              />
-              <button
-                type="button"
-                onClick={addItem}
-                className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs"
-              >
-                Add
-              </button>
-            </div>
-          )}
-        </div>
-
       </div>
 
       {activePrime && (

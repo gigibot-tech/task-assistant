@@ -15,6 +15,11 @@ export function primePromptKey(prime: number): string {
   return `prime:${prime}`
 }
 
+/** Combined daily drive reflection (all aspects in one modal). */
+export function driveDailyPromptKey(): string {
+  return 'drive:daily'
+}
+
 export function probePromptKey(trigger: 'deviation' | 'stale' | 'manual'): string {
   return `probe:${trigger}`
 }

@@ -1,5 +1,7 @@
 import type { PhaseBalance } from '../../../../src/features/softwarePhases/types'
 import { isPhaseImbalanced } from './phaseTime'
+import type { TaskBreakdownItem } from '../../../../src/lib/taskBreakdownTypes'
+import { breakdownToSubtaskRecords } from '../../../../src/lib/breakdownHelpers'
 
 export interface PhaseAlertPayload {
   type: 'phase_imbalance' | 'extract_due' | 'phase_mismatch'
@@ -9,17 +11,41 @@ export interface PhaseAlertPayload {
   work_phase?: string
 }
 
+function resolveSubtasks(task: {
+  task_breakdown?: TaskBreakdownItem[]
+  subtasks?: Array<{
+    id: string
+    status?: string
+    validated_with_real_input?: boolean
+    phase?: string
+    extraction_of_subtask_id?: string
+  }>
+}) {
+  if (task.task_breakdown?.length) {
+    return breakdownToSubtaskRecords(task.task_breakdown).map((r) => ({
+      id: r.id,
+      status: r.status,
+      validated_with_real_input: r.validated_with_real_input,
+      phase: r.phase,
+      extraction_of_subtask_id: r.extraction_of_subtask_id
+    }))
+  }
+  return task.subtasks ?? []
+}
+
 export function checkPhaseImbalanceAlert(
   task: {
     id: string
     title: string
     work_phase?: string
     phase_balance?: PhaseBalance
+    task_breakdown?: TaskBreakdownItem[]
     subtasks?: Array<{
       id: string
       status?: string
       validated_with_real_input?: boolean
       phase?: string
+      extraction_of_subtask_id?: string
     }>
     active_subtask_id?: string | null
   },
@@ -41,14 +67,13 @@ export function checkPhaseImbalanceAlert(
     }
   }
 
-  const active = task.subtasks?.find((s) => s.id === task.active_subtask_id)
+  const subtasks = resolveSubtasks(task)
+  const active = subtasks.find((s) => s.id === task.active_subtask_id)
   if (
     active?.phase === 'playground' &&
     active.validated_with_real_input &&
-    !task.subtasks?.some(
-      (s) =>
-        s.phase === 'core' &&
-        (s as { extraction_of_subtask_id?: string }).extraction_of_subtask_id === active.id
+    !subtasks.some(
+      (s) => s.phase === 'core' && s.extraction_of_subtask_id === active.id
     )
   ) {
     return {

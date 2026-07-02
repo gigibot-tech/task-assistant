@@ -2,6 +2,8 @@ import { randomUUID } from 'crypto'
 import { ollamaGenerate, parseJsonResponse } from '../ollamaClient'
 import { getOllamaNumPredict } from '../ollamaSettings'
 import { buildSmeValidationPrompt, type SmeTaskContext } from './smePrompt'
+import { getActiveBreakdownItem } from '../../../src/lib/breakdownHelpers'
+import type { Task } from '../../../src/store/taskStore'
 
 export interface SmeRecommendedStep {
   title: string
@@ -127,9 +129,7 @@ export async function runSmeValidation(
 }
 
 export function smeTaskContextFromRecord(task: Record<string, unknown>): SmeTaskContext {
-  const subtasks = (task.subtasks ?? []) as Array<{ id: string; title?: string }>
-  const activeId = task.active_subtask_id as string | null | undefined
-  const active = subtasks.find((s) => s.id === activeId)
+  const active = getActiveBreakdownItem(task as Task)
 
   return {
     title: String(task.title ?? 'Untitled task'),

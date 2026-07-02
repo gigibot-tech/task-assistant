@@ -13,6 +13,7 @@ export interface ProbeRunInput {
   task: {
     title: string
     description?: string
+    task_breakdown?: import('../../../src/lib/taskBreakdownTypes').TaskBreakdownItem[]
     subtasks?: SubtaskRecord[]
     active_subtask_id?: string | null
     work_phase?: string

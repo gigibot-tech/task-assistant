@@ -1,7 +1,17 @@
-import { desktopCapturer, screen, systemPreferences, shell } from 'electron'
+import { desktopCapturer, screen, systemPreferences, shell, app } from 'electron'
 import fs from 'fs'
 import path from 'path'
-import { app } from 'electron'
+
+let captureDisplayResolver: (() => number | undefined) | undefined
+
+export function setCaptureDisplayResolver(resolver: () => number | undefined): void {
+  captureDisplayResolver = resolver
+}
+
+function effectiveDisplayId(displayId?: number): number | undefined {
+  if (displayId != null) return displayId
+  return captureDisplayResolver?.()
+}
 
 export type ScreenPermissionStatus = 'granted' | 'denied' | 'not-determined' | 'restricted' | 'unsupported'
 
@@ -9,6 +19,15 @@ export interface ScreenCaptureResult {
   imagePath: string
   timestamp: string
   displayId: number
+}
+
+export interface CaptureDisplayInfo {
+  id: number
+  label: string
+  width: number
+  height: number
+  isPrimary: boolean
+  thumbnailDataUrl: string
 }
 
 export interface ScreenPermissionResult {
@@ -110,7 +129,6 @@ export async function requestScreenPermission(): Promise<ScreenPermissionResult>
     }
   }
 
-  // Attempt capture — on first use macOS shows the Screen Recording permission dialog
   await probeScreenCapture()
 
   const afterPrompt = getScreenPermissionStatus()
@@ -124,10 +142,7 @@ export async function requestScreenPermission(): Promise<ScreenPermissionResult>
   }
 
   const afterProbe = afterPrompt
-
-  // If still not granted, open System Settings (required when user previously denied)
   const openedSettings = await openScreenRecordingSettings()
-
   const finalStatus = getScreenPermissionStatus()
   const granted = finalStatus === 'granted'
 
@@ -159,15 +174,71 @@ export async function requestScreenPermission(): Promise<ScreenPermissionResult>
   }
 }
 
-async function getScreenSource() {
-  const primaryDisplay = screen.getPrimaryDisplay()
-  const { width, height } = primaryDisplay.size
+function resolveDisplay(displayId?: number) {
+  const displays = screen.getAllDisplays()
+  const primary = screen.getPrimaryDisplay()
+  const effectiveId = effectiveDisplayId(displayId)
+  if (effectiveId != null) {
+    return displays.find((d) => d.id === effectiveId) ?? primary
+  }
+  return primary
+}
 
-  const sources = await desktopCapturer.getSources({
+async function getScreenSources(thumbnailSize: { width: number; height: number }) {
+  return desktopCapturer.getSources({
     types: ['screen'],
-    thumbnailSize: { width, height },
+    thumbnailSize,
     fetchWindowIcons: false
   })
+}
+
+function matchSourceForDisplay(
+  sources: Electron.DesktopCapturerSource[],
+  display: Electron.Display,
+  index: number
+) {
+  const byId = sources.find((s) => String(s.display_id) === String(display.id))
+  if (byId) return byId
+  if (index >= 0 && index < sources.length) return sources[index]
+  return sources[0]
+}
+
+export async function listCaptureDisplays(): Promise<CaptureDisplayInfo[]> {
+  const displays = screen.getAllDisplays()
+  const primaryId = screen.getPrimaryDisplay().id
+  const maxW = Math.max(...displays.map((d) => d.size.width), 320)
+  const maxH = Math.max(...displays.map((d) => d.size.height), 240)
+  const sources = await getScreenSources({
+    width: Math.min(maxW, 640),
+    height: Math.min(maxH, 360)
+  })
+
+  return displays.map((display, index) => {
+    const source = matchSourceForDisplay(sources, display, index)
+    const thumbnail = source?.thumbnail
+    const thumbnailDataUrl =
+      thumbnail && isThumbnailValid(thumbnail)
+        ? `data:image/png;base64,${thumbnail.toPNG().toString('base64')}`
+        : ''
+
+    return {
+      id: display.id,
+      label: `Display ${index + 1}${display.id === primaryId ? ' (Primary)' : ''}`,
+      width: display.size.width,
+      height: display.size.height,
+      isPrimary: display.id === primaryId,
+      thumbnailDataUrl
+    }
+  })
+}
+
+async function getScreenSource(displayId?: number) {
+  const targetDisplay = resolveDisplay(displayId)
+  const { width, height } = targetDisplay.size
+  const displays = screen.getAllDisplays()
+  const displayIndex = displays.findIndex((d) => d.id === targetDisplay.id)
+
+  const sources = await getScreenSources({ width, height })
 
   if (sources.length === 0) {
     throw new ScreenPermissionError(
@@ -176,8 +247,8 @@ async function getScreenSource() {
     )
   }
 
-  const source = sources[0]
-  if (!isThumbnailValid(source.thumbnail)) {
+  const source = matchSourceForDisplay(sources, targetDisplay, displayIndex)
+  if (!source || !isThumbnailValid(source.thumbnail)) {
     const status = getScreenPermissionStatus()
     throw new ScreenPermissionError(
       status === 'denied'
@@ -187,11 +258,11 @@ async function getScreenSource() {
     )
   }
 
-  return { source, primaryDisplay }
+  return { source, targetDisplay }
 }
 
-export async function captureScreen(): Promise<ScreenCaptureResult> {
-  const { source, primaryDisplay } = await getScreenSource()
+export async function captureScreen(displayId?: number): Promise<ScreenCaptureResult> {
+  const { source, targetDisplay } = await getScreenSource(displayId)
   const pngBuffer = source.thumbnail.toPNG()
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
@@ -208,12 +279,12 @@ export async function captureScreen(): Promise<ScreenCaptureResult> {
   return {
     imagePath,
     timestamp: new Date().toISOString(),
-    displayId: primaryDisplay.id
+    displayId: targetDisplay.id
   }
 }
 
-export async function captureScreenBase64(): Promise<string> {
-  const { source } = await getScreenSource()
+export async function captureScreenBase64(displayId?: number): Promise<string> {
+  const { source } = await getScreenSource(displayId)
   return source.thumbnail.toPNG().toString('base64')
 }
 
