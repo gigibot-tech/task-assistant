@@ -23,12 +23,17 @@ jobs:
 
       - run: npm ci
       - run: npm run electron:build
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: |
             release/*.dmg
             release/*.zip
             release/latest-mac.yml
           generate_release_notes: true
+          fail_on_unmatched_files: true

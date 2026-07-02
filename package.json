@@ -65,6 +65,9 @@
     ],
     "mac": {
       "icon": "resources/icon.png",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
       "target": [
         "dmg",
         "zip"
