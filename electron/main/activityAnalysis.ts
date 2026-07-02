@@ -373,6 +373,29 @@ export async function analyzeScreenshotActivity(
     base64 = prepareVisionBase64(pngBuffer)
   }
 
+  return analyzeScreenshotImage(model, base64, imagePath, options)
+}
+
+export async function analyzeScreenshotAtPath(
+  model: string,
+  screenshotPath: string,
+  options?: { numPredict?: number; showErrorDialog?: boolean }
+): Promise<ActivityAnalysis> {
+  const fs = await import('fs')
+  if (!fs.existsSync(screenshotPath)) {
+    throw new Error('Screenshot file not found')
+  }
+  const pngBuffer = fs.readFileSync(screenshotPath)
+  const base64 = prepareVisionBase64(pngBuffer)
+  return analyzeScreenshotImage(model, base64, screenshotPath, options)
+}
+
+async function analyzeScreenshotImage(
+  model: string,
+  base64: string,
+  imagePath: string | undefined,
+  options?: { numPredict?: number; showErrorDialog?: boolean }
+): Promise<ActivityAnalysis> {
   const prompt = `Look at this screenshot. Describe what the user is actively doing — name specific apps and content visible.
 Respond with JSON only: {"activity": "detailed description", "label": "short label e.g. coding, task-manager, browsing"}`
 

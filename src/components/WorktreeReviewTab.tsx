@@ -13,7 +13,7 @@ import {
   getReviewStatusColor,
   type ReviewStatusColor
 } from '../types/review'
-import { getActiveWorkplacePath, migrateTaskWorkspaces, setActiveWorkspace } from '../lib/taskWorkspaces'
+import { getActiveWorkplacePath, migrateTaskWorkspaces, setReviewWorkspace, addWorkspace, updateWorkspacePath, getReviewWorkspace, getReviewWorkplacePath } from '../lib/taskWorkspaces'
 import WorkspaceSelector from './WorkspaceSelector'
 
 interface WorktreeReviewTabProps {
@@ -320,13 +320,14 @@ export default function WorktreeReviewTab({ task, onTaskUpdated }: WorktreeRevie
 
   const liveTask = useTaskStore((state) => state.tasks.find((t) => t.id === task.id) ?? task)
   const normalizedTask = migrateTaskWorkspaces(liveTask)
-  const activeWorkplacePath = getActiveWorkplacePath(normalizedTask)
+  const reviewWorkspace = getReviewWorkspace(normalizedTask)
+  const reviewWorkplacePath = getReviewWorkplacePath(normalizedTask)
   const reviewStatuses = normalizedTask.review_statuses
 
-  const stats = useMemo(
-    () => getReviewStats(task.id, files.length || undefined),
-    [reviewStatuses, task.id, files.length, getReviewStats]
-  )
+  const applyReviewWorkspacePatch = async (patch: Partial<Task>) => {
+    await updateTask(task.id, patch)
+    await syncTask()
+  }
 
   const syncTask = async () => {
     await loadTasks()
@@ -334,23 +335,56 @@ export default function WorktreeReviewTab({ task, onTaskUpdated }: WorktreeRevie
     if (updated) onTaskUpdated?.(updated)
   }
 
+  const stats = useMemo(
+    () => getReviewStats(task.id, files.length || undefined),
+    [reviewStatuses, task.id, files.length, getReviewStats]
+  )
+
   useEffect(() => {
-    if (activeWorkplacePath) void loadFiles()
+    if (reviewWorkplacePath) void loadFiles()
     else setFiles([])
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task.id, activeWorkplacePath, task.active_workspace_id])
+  }, [task.id, reviewWorkplacePath, normalizedTask.review_workspace_id, normalizedTask.active_workspace_id])
 
-  const selectWorkspace = async (workspaceId: string) => {
-    const next = setActiveWorkspace(normalizedTask, workspaceId)
-    await updateTask(task.id, {
+  const selectReviewWorkspace = async (workspaceId: string) => {
+    const next = setReviewWorkspace(normalizedTask, workspaceId)
+    await applyReviewWorkspacePatch({
+      review_workspace_id: next.review_workspace_id,
+      review_statuses: next.review_statuses,
+      review_schedule: next.review_schedule
+    })
+  }
+
+  const pickReviewFolder = async () => {
+    if (!window.electron?.pickWorkplaceFolder) {
+      setError('Restart the app (Cmd+Q) to enable the folder picker.')
+      return
+    }
+    const result = await window.electron.pickWorkplaceFolder()
+    if (!result.path) return
+
+    const existing = normalizedTask.workspaces?.find((w) => w.path === result.path)
+    let next = normalizedTask
+    if (existing) {
+      next = setReviewWorkspace(next, existing.id)
+    } else if (reviewWorkspace) {
+      next = updateWorkspacePath(next, reviewWorkspace.id, result.path)
+      next = setReviewWorkspace(next, reviewWorkspace.id)
+    } else {
+      next = addWorkspace(next, result.path, { makeActive: !getActiveWorkplacePath(normalizedTask) })
+      const added = next.workspaces?.find((w) => w.path === result.path)
+      if (added) next = setReviewWorkspace(next, added.id)
+    }
+
+    await applyReviewWorkspacePatch({
       workspaces: next.workspaces,
       active_workspace_id: next.active_workspace_id,
       workplace_folder: next.workplace_folder,
       workplace_index: next.workplace_index,
+      review_workspace_id: next.review_workspace_id,
       review_statuses: next.review_statuses,
       review_schedule: next.review_schedule
     })
-    await syncTask()
   }
 
   const loadFiles = async () => {
@@ -425,11 +459,31 @@ export default function WorktreeReviewTab({ task, onTaskUpdated }: WorktreeRevie
 
   const hiddenCount = Object.values(reviewStatuses ?? {}).filter((s) => s.hidden).length
 
-  if (!activeWorkplacePath) {
+  if (!reviewWorkplacePath) {
     return (
-      <div className="flex flex-col items-center justify-center h-full p-8 text-center">
-        <h3 className="text-sm font-medium text-gray-400 mb-1">No workspace selected</h3>
-        <p className="text-xs text-gray-500">Add a workspace in the Workplace tab.</p>
+      <div className="flex flex-col items-center justify-center h-full p-8 text-center gap-3">
+        <h3 className="text-sm font-medium text-gray-400">Review workspace</h3>
+        <p className="text-xs text-gray-500 max-w-sm">
+          Choose a folder to review. This can differ from your active workplace workspace.
+        </p>
+        {(normalizedTask.workspaces?.length ?? 0) > 0 && (
+          <div className="w-full max-w-md">
+            <WorkspaceSelector
+              task={normalizedTask}
+              selectedId={normalizedTask.review_workspace_id ?? undefined}
+              alwaysSelectable
+              ariaLabel="Review workspace"
+              onSelect={(id) => void selectReviewWorkspace(id)}
+            />
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => void pickReviewFolder()}
+          className="text-xs px-3 py-1.5 bg-primary-600 hover:bg-primary-700 rounded"
+        >
+          Choose folder…
+        </button>
       </div>
     )
   }
@@ -437,16 +491,31 @@ export default function WorktreeReviewTab({ task, onTaskUpdated }: WorktreeRevie
   return (
     <div className="flex flex-col h-full bg-gray-900">
       <div className="border-b border-gray-700 bg-gray-800 px-3 py-2 space-y-2">
-        {(normalizedTask.workspaces?.length ?? 0) > 1 && (
-          <div>
-            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Workspace</p>
+        <div>
+          <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Review workspace</p>
+          <div className="flex items-center gap-2 flex-wrap">
             <WorkspaceSelector
               task={normalizedTask}
               compact
-              onSelect={(id) => void selectWorkspace(id)}
+              alwaysSelectable
+              selectedId={normalizedTask.review_workspace_id ?? reviewWorkspace?.id}
+              ariaLabel="Review workspace"
+              onSelect={(id) => void selectReviewWorkspace(id)}
             />
+            <button
+              type="button"
+              onClick={() => void pickReviewFolder()}
+              className="text-[10px] px-2 py-0.5 bg-gray-700 hover:bg-gray-600 rounded shrink-0"
+            >
+              Set folder…
+            </button>
           </div>
-        )}
+          {reviewWorkspace?.path && (
+            <p className="text-[9px] text-gray-600 font-mono truncate mt-1" title={reviewWorkspace.path}>
+              {reviewWorkspace.path}
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-2 flex-wrap">
           <label className="text-[10px] text-gray-500">Span (days)</label>
           <input

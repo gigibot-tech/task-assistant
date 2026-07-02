@@ -1,9 +1,9 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog, protocol } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import fs from 'fs'
 import { captureScreen, captureScreenBase64, cleanupOldScreenshots, getRecentScreenshots, getScreenPermissionStatus, requestScreenPermission, openScreenRecordingSettings, verifyScreenCaptureWorks } from './screenCapture'
-import { checkDeviationFromScreen, analyzeScreenshotActivity, compareTaskToActivity, formatPlannedTask } from './activityAnalysis'
+import { checkDeviationFromScreen, analyzeScreenshotActivity, analyzeScreenshotAtPath, compareTaskToActivity, formatPlannedTask } from './activityAnalysis'
 import { deliverDeviationAlert, updateTrayMonitoringLabel } from './focusAlerts'
 import { initNativeNotifications, openNotificationSettings, showNativeNotification } from './nativeNotifications'
 import {
@@ -73,6 +73,7 @@ import { taskSubtaskContextFromTask } from './subtaskProbe/subtaskFocusContext'
 import {
   DEFAULT_FEATURE_FLAGS,
   getFeatureFlagsFromSettings,
+  isFeatureEnabled,
   mergeFeatureFlags
 } from './features/registry'
 import {
@@ -84,6 +85,7 @@ import {
 import { registerFeatureIpc } from './features/kernel/ipcRouter'
 import {
   getActiveWorkplacePath,
+  getReviewWorkplacePath,
   mergeTaskUpdate,
   normalizeTaskWorkspaces,
   type TaskWithWorkspaces
@@ -107,12 +109,39 @@ import {
   generateReviewSchedule
 } from './review/reviewScheduler'
 import { runSmeValidation, smeTaskContextFromRecord } from './sme/smeValidator'
+import { fromAppFileUrl } from '../../src/shared/appFileUrl'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const DEFAULT_OLLAMA_MODEL = 'gemma4:latest'
 const OLLAMA_API_URL = 'http://localhost:11434/api/generate'
 const OLLAMA_TAGS_URL = 'http://localhost:11434/api/tags'
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'app-file',
+    privileges: {
+      standard: true,
+      secure: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true
+    }
+  }
+])
+
+function registerAppFileProtocol(): void {
+  protocol.registerFileProtocol('app-file', (request, callback) => {
+    try {
+      const filePath = fromAppFileUrl(request.url)
+      callback({ path: filePath })
+    } catch (err) {
+      console.error('[app-file] failed:', request.url, err)
+      callback({ error: -2 })
+    }
+  })
+}
 
 let dataPath: string
 let mainWindow: BrowserWindow | null = null
@@ -532,6 +561,21 @@ function persistFocusCheckResult(
         similarity: result.similarity,
         activity: result.currentActivity
       }
+    }
+
+    if (result.imagePath) {
+      const screenshots = [...((task.screenshots as unknown[]) ?? [])]
+      screenshots.push({
+        timestamp: new Date().toISOString(),
+        imagePath: result.imagePath,
+        aiPrediction: result.currentActivity,
+        activityLabel: result.activityLabel ?? 'focus_check',
+        recommendation: result.suggestion,
+        deviationScore: 1 - result.similarity,
+        onTask: result.onTask,
+        similarity: result.similarity
+      })
+      nextTask.screenshots = screenshots
     }
 
     if (
@@ -1015,8 +1059,13 @@ function startDeviationPolling(runImmediately = false) {
 
   const data = readData()
   const settings = data.settings || {}
+  const flags = getFeatureFlagsFromSettings(settings)
 
-  if (settings.autoScreenshotMonitoring === false || !settings.activeTaskId) {
+  if (
+    settings.autoScreenshotMonitoring === false ||
+    !settings.activeTaskId ||
+    !isFeatureEnabled(flags, 'focusMonitor')
+  ) {
     disableBackgroundMonitoring()
     updateTrayForMonitoring(false)
     return
@@ -1641,9 +1690,9 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
     if (taskIndex === -1) throw new Error('Task not found')
 
     const task = normalizeTaskWorkspaces(data.tasks[taskIndex] as TaskWithWorkspaces)
-    const workplacePath = getActiveWorkplacePath(task)
+    const workplacePath = getReviewWorkplacePath(task)
     if (!workplacePath) {
-      throw new Error('No workplace folder set on this task')
+      throw new Error('No review workspace set on this task')
     }
 
     const wpSettings = getWorkplaceSettingsFromData(data)
@@ -1692,9 +1741,9 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
       if (taskIndex === -1) throw new Error('Task not found')
 
       const task = normalizeTaskWorkspaces(data.tasks[taskIndex] as TaskWithWorkspaces)
-      const workplacePath = getActiveWorkplacePath(task)
+      const workplacePath = getReviewWorkplacePath(task)
       if (!workplacePath) {
-        throw new Error('No workplace folder set on this task')
+        throw new Error('No review workspace set on this task')
       }
 
       const wpSettings = getWorkplaceSettingsFromData(data)
@@ -1881,9 +1930,12 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
       delete settings.pomodoro
     }
     data.settings = { ...data.settings, ...settings }
+    if (settings.featureFlags) {
+      data.settings.featureFlags = mergeFeatureFlags(settings.featureFlags)
+    }
     writeData(data)
 
-    if ('pollIntervalMinutes' in settings || 'autoScreenshotMonitoring' in settings) {
+    if ('pollIntervalMinutes' in settings || 'autoScreenshotMonitoring' in settings || 'featureFlags' in settings) {
       if (data.settings.autoScreenshotMonitoring === false) {
         stopDeviationPolling()
       } else {
@@ -2085,29 +2137,17 @@ Respond with JSON: {"alignment": 0-1, "feedback": "...", "agreement": "agree"|"d
 
   ipcMain.handle('analyze-screenshot-for-task', async (_: any, taskId: string, screenshotPath: string) => {
     try {
-      const prompt = `Analyze this screenshot context and describe what the user is likely doing.
-Provide activity description, label, and focus recommendation.
-Respond with JSON: {"activity": "...", "label": "...", "recommendation": "..."}`
-
-      const response = await axios.post(
-        OLLAMA_API_URL,
-        {
-          model: getOllamaModel(),
-          prompt,
-          stream: false,
-          format: 'json'
-        },
-        { timeout: 30000 }
-      )
-
-      const analysis = JSON.parse(response.data.response)
-
       const data = readData()
       const task = data.tasks.find((t: any) => t.id === taskId)
 
       if (!task) {
         throw new Error('Task not found')
       }
+
+      const analysis = await analyzeScreenshotAtPath(getOllamaModel(), screenshotPath, {
+        numPredict: getOllamaNumPredict(data.settings, 'text'),
+        showErrorDialog: true
+      })
 
       const comparison = await compareTaskToActivity(
         getOllamaModel(),
@@ -2125,7 +2165,7 @@ Respond with JSON: {"activity": "...", "label": "...", "recommendation": "..."}`
         imagePath: screenshotPath,
         aiPrediction: analysis.activity,
         activityLabel: analysis.label,
-        recommendation: comparison.explanation || analysis.recommendation,
+        recommendation: comparison.explanation || analysis.activity,
         deviationScore,
         onTask: comparison.onTask,
         similarity: comparison.similarity
@@ -2328,6 +2368,7 @@ async function waitForOllama(model: string): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+  registerAppFileProtocol()
   initDataStorage()
   migratePersistedData()
 

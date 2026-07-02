@@ -45,7 +45,7 @@ const defaultPomodoro = (): PomodoroSettings => ({
   autoStartWork: true
 })
 
-export default function SettingsPanel() {
+export default function SettingsPanel({ onSettingsSaved }: { onSettingsSaved?: () => void }) {
   const [settings, setSettings] = useState<Settings>({
     ollamaModel: 'gemma4:latest',
     ollamaNumPredict: 1024,
@@ -86,6 +86,7 @@ export default function SettingsPanel() {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
     await window.electron.updateSettings(settings)
+    onSettingsSaved?.()
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
   }

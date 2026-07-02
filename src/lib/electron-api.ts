@@ -1,6 +1,16 @@
 /** Safe wrappers — preload only loads on app start; renderer HMR can outpace main. */
 
-export const REQUIRED_PRELOAD_VERSION = 12
+import { toAppFileUrl } from '../shared/appFileUrl'
+
+export const REQUIRED_PRELOAD_VERSION = 13
+
+export function appFileUrl(filePath: string): string {
+  if (!filePath) return ''
+  if (typeof window.electron?.getAppFileUrl === 'function') {
+    return window.electron.getAppFileUrl(filePath)
+  }
+  return toAppFileUrl(filePath)
+}
 
 export interface ScreenPermissionResponse {
   status: string

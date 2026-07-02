@@ -38,11 +38,15 @@ export const FEATURE_LABELS: Record<
     tooltip: 'Sort Desktop/OneDrive inbox files with rules + Ollama review'
   },
   review: {
-    label: 'Worktree code review',
+    label: 'Review workspace',
     tooltip: 'Multi-day file review schedule with checkmarks and date coloring'
   },
   smeValidator: {
     label: 'SME opinion validation',
     tooltip: 'Per-task expert opinion checks with timeline and subtask recommendations'
+  },
+  focusMonitor: {
+    label: 'Screen capture',
+    tooltip: 'Automatic background screenshots, history gallery, and focus polling'
   }
 }

@@ -1,7 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+import { toAppFileUrl } from '../../src/shared/appFileUrl'
+
 contextBridge.exposeInMainWorld('electron', {
-  preloadVersion: 12,
+  preloadVersion: 13,
+  getAppFileUrl: (filePath: string) => toAppFileUrl(filePath),
   getTasks: () => ipcRenderer.invoke('get-tasks'),
   createTask: (task: any) => ipcRenderer.invoke('create-task', task),
   updateTask: (id: string, updates: any) => ipcRenderer.invoke('update-task', id, updates),
@@ -118,6 +121,7 @@ export interface DeviationScreenResult {
 
 export interface ElectronAPI {
   preloadVersion: number
+  getAppFileUrl: (filePath: string) => string
   getTasks: () => Promise<any[]>
   createTask: (task: any) => Promise<any>
   updateTask: (id: string, updates: any) => Promise<any>

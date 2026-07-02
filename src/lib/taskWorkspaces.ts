@@ -6,10 +6,13 @@ export {
   defaultWorkspaceLabel,
   getActiveWorkspace,
   getActiveWorkplacePath,
+  getReviewWorkspace,
+  getReviewWorkplacePath,
   mergeTaskUpdate,
   migrateTaskWorkspaces,
   normalizeTaskWorkspaces,
   removeWorkspace,
   setActiveWorkspace,
+  setReviewWorkspace,
   updateWorkspacePath
 } from '../shared/workplace/workspaces'

@@ -4,6 +4,15 @@ import type {
   SmeWindowDays
 } from '../types/smeValidation'
 
+/** Domain / topic label derived from a task in the task list */
+export function domainFromTask(task: { title: string; tags?: string[] }): string {
+  const title = task.title.trim()
+  const tags = (task.tags ?? []).map((t) => t.trim()).filter(Boolean)
+  if (!title && tags.length) return tags.join(', ')
+  if (!tags.length) return title
+  return `${title} (${tags.join(', ')})`
+}
+
 const MS_PER_DAY = 86_400_000
 
 export function filterSmeByWindow(

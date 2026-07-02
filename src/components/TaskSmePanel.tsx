@@ -4,6 +4,7 @@ import type { SmeValidationEntry, SmeWindowDays } from '../types/smeValidation'
 import {
   agreementColorClass,
   agreementIcon,
+  domainFromTask,
   filterSmeByWindow,
   formatSmeTimelineLabel
 } from '../lib/smeValidation'
@@ -23,7 +24,7 @@ export default function TaskSmePanel({ task, onUpdate, fullWidth = false }: Task
   const latest = validations.length > 0 ? validations[validations.length - 1] : null
 
   const [expanded, setExpanded] = useState(fullWidth || validations.length > 0)
-  const [domain, setDomain] = useState(latest?.domain ?? '')
+  const domain = useMemo(() => domainFromTask(task), [task.id, task.title, task.tags])
   const [approach, setApproach] = useState(
     latest?.approach ?? task.description?.trim() ?? ''
   )
@@ -35,7 +36,6 @@ export default function TaskSmePanel({ task, onUpdate, fullWidth = false }: Task
   const [latestEntry, setLatestEntry] = useState<SmeValidationEntry | null>(null)
 
   useEffect(() => {
-    setDomain(latest?.domain ?? '')
     setApproach(latest?.approach ?? task.description?.trim() ?? '')
     setLatestEntry(null)
     setSelectedEntryId(null)
@@ -54,7 +54,7 @@ export default function TaskSmePanel({ task, onUpdate, fullWidth = false }: Task
   const handleValidate = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!domain.trim() || !approach.trim()) {
-      setError('Domain and approach are required.')
+      setError('Task title and approach are required.')
       return
     }
     setLoading(true)
@@ -138,14 +138,10 @@ export default function TaskSmePanel({ task, onUpdate, fullWidth = false }: Task
 
           <form onSubmit={(e) => void handleValidate(e)} className="space-y-2">
             <div>
-              <label className="block text-xs text-gray-500 mb-1">Domain / topic</label>
-              <input
-                type="text"
-                value={domain}
-                onChange={(e) => setDomain(e.target.value)}
-                placeholder="e.g. React performance, API design"
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm focus:outline-none focus:border-primary-500"
-              />
+              <label className="block text-xs text-gray-500 mb-1">Domain / topic (from task)</label>
+              <p className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-300">
+                {domain || 'Untitled task'}
+              </p>
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">Your approach</label>

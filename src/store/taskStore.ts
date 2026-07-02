@@ -101,6 +101,8 @@ export interface Task {
   review_statuses?: Record<string, FileReviewStatus>
   /** AI-generated review schedule */
   review_schedule?: ReviewSchedule
+  /** Workspace used by the Review tab (defaults to active workspace) */
+  review_workspace_id?: string | null
   /** SME expert opinion validations — timeline per task */
   sme_validations?: import('../types/smeValidation').SmeValidationEntry[]
   sme_window_days?: import('../types/smeValidation').SmeWindowDays

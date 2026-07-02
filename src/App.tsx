@@ -46,7 +46,7 @@ import type { StuckTrigger } from './lib/subtaskTypes'
 import { useFeatureFlags } from './features/useFeatureFlags'
 import { renderTaskDetailSlots } from './features/manifests'
 import SemanticSorterPanel from './components/SemanticSorterPanel'
-import { semanticSorterActive, reviewActive } from './features/registry'
+import { semanticSorterActive, reviewActive, smeValidatorActive, focusMonitorActive } from './features/registry'
 import { allocateOfflineTime } from './lib/electron-api'
 
 type ActiveView = 'tasks' | 'analytics' | 'settings' | 'sme' | 'focus' | 'desktop_sorter' | 'review'
@@ -111,8 +111,15 @@ function App() {
     sessionStartedAt: string
   } | null>(null)
 
-  const { flags: featureFlags } = useFeatureFlags()
+  const { flags: featureFlags, refresh: refreshFeatureFlags } = useFeatureFlags()
   const [, setPomodoroTick] = useState(0)
+
+  useEffect(() => {
+    if (activeView === 'review' && !reviewActive(featureFlags)) setActiveView('tasks')
+    if (activeView === 'desktop_sorter' && !semanticSorterActive(featureFlags)) setActiveView('tasks')
+    if (activeView === 'sme' && !smeValidatorActive(featureFlags)) setActiveView('tasks')
+    if (activeView === 'focus' && !focusMonitorActive(featureFlags)) setActiveView('tasks')
+  }, [activeView, featureFlags])
 
   const refreshPomodoro = useCallback(async () => {
     if (!window.electron.getPomodoroStatus) return
@@ -527,6 +534,21 @@ function App() {
     if (taskFilter === 'completed') return task.status === 'completed'
     return true
   })
+
+  const taskCounts = useMemo(() => {
+    const completed = tasks.filter((t) => t.status === 'completed').length
+    const inProgress = tasks.filter((t) => t.status === 'in_progress').length
+    return { total: tasks.length, completed, inProgress }
+  }, [tasks])
+
+  const showInProgressFilter =
+    taskCounts.inProgress > 0 && taskCounts.inProgress < taskCounts.total
+  const showCompletedFilter = taskCounts.completed > 0
+
+  useEffect(() => {
+    if (taskFilter === 'completed' && !showCompletedFilter) setTaskFilter('all')
+    if (taskFilter === 'in_progress' && !showInProgressFilter) setTaskFilter('all')
+  }, [taskFilter, showCompletedFilter, showInProgressFilter])
 
   const runningTask = useMemo(
     () => tasks.find((t) => t.work_sessions?.some((s) => !s.ended_at)),
@@ -1071,32 +1093,40 @@ function App() {
             >
               All Tasks
             </button>
-            <button
-              onClick={() => { setActiveView('tasks'); setTaskFilter('in_progress') }}
-              className={filterButtonClass('in_progress')}
-            >
-              In Progress
-            </button>
-            <button
-              onClick={() => { setActiveView('tasks'); setTaskFilter('completed') }}
-              className={filterButtonClass('completed')}
-            >
-              Completed
-            </button>
+            {showInProgressFilter && (
+              <button
+                onClick={() => { setActiveView('tasks'); setTaskFilter('in_progress') }}
+                className={filterButtonClass('in_progress')}
+              >
+                In Progress
+              </button>
+            )}
+            {showCompletedFilter && (
+              <button
+                onClick={() => { setActiveView('tasks'); setTaskFilter('completed') }}
+                className={filterButtonClass('completed')}
+              >
+                Completed
+              </button>
+            )}
 
             <p className="text-xs text-gray-500 uppercase tracking-wide px-4 mb-2 mt-4">Features</p>
             <button onClick={() => setActiveView('analytics')} className={navButtonClass('analytics')}>
               Analytics
             </button>
-            <button onClick={() => setActiveView('sme')} className={navButtonClass('sme')}>
-              SME Validation
-            </button>
-            <button onClick={() => setActiveView('focus')} className={navButtonClass('focus')}>
-              Focus Monitor
-            </button>
+            {smeValidatorActive(featureFlags) && (
+              <button onClick={() => setActiveView('sme')} className={navButtonClass('sme')}>
+                SME Validation
+              </button>
+            )}
+            {focusMonitorActive(featureFlags) && (
+              <button onClick={() => setActiveView('focus')} className={navButtonClass('focus')}>
+                Screen Capture
+              </button>
+            )}
             {reviewActive(featureFlags) && (
               <button onClick={() => setActiveView('review')} className={navButtonClass('review')}>
-                Review
+                Review workspace
               </button>
             )}
             {semanticSorterActive(featureFlags) && (
@@ -1153,8 +1183,10 @@ function App() {
             />
           )}
           {activeView === 'analytics' && <TaskAnalytics />}
-          {activeView === 'settings' && <SettingsPanel />}
-          {activeView === 'sme' && (
+          {activeView === 'settings' && (
+            <SettingsPanel onSettingsSaved={() => void refreshFeatureFlags()} />
+          )}
+          {activeView === 'sme' && smeValidatorActive(featureFlags) && (
             <SMEValidation
               task={selectedTask}
               onUpdate={async (updates) => {
@@ -1167,7 +1199,7 @@ function App() {
           {activeView === 'desktop_sorter' && semanticSorterActive(featureFlags) && (
             <SemanticSorterPanel />
           )}
-          {activeView === 'focus' && (
+          {activeView === 'focus' && focusMonitorActive(featureFlags) && (
             <ScreenCapture selectedTaskId={selectedTask?.id || activeTask?.id} />
           )}
           {activeView === 'review' && reviewActive(featureFlags) && selectedTask && (
@@ -1179,7 +1211,7 @@ function App() {
           {activeView === 'review' && reviewActive(featureFlags) && !selectedTask && (
             <div className="flex items-center justify-center h-full">
               <div className="text-center text-gray-400">
-                <p className="text-lg mb-2">Select a task to review its files</p>
+                <p className="text-lg mb-2">Select a task to open its review workspace</p>
                 <p className="text-sm">Choose a task from the sidebar to get started</p>
               </div>
             </div>

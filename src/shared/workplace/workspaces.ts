@@ -20,6 +20,8 @@ export interface TaskWithWorkspaces {
   id?: string
   workspaces?: TaskWorkspace[]
   active_workspace_id?: string | null
+  /** Workspace used by the Review tab (defaults to active workspace) */
+  review_workspace_id?: string | null
   workplace_folder?: string | null
   workplace_index?: WorkplaceIndex
   review_statuses?: Record<string, FileReviewStatus>
@@ -46,9 +48,20 @@ function getActiveWorkspaceRaw(task: TaskWithWorkspaces): TaskWorkspace | null {
   return list.find((w) => w.id === activeId) ?? list[0]
 }
 
+function getReviewWorkspaceRaw(task: TaskWithWorkspaces): TaskWorkspace | null {
+  const list = task.workspaces ?? []
+  if (!list.length) return null
+  const reviewId = task.review_workspace_id
+  if (reviewId) {
+    return list.find((w) => w.id === reviewId) ?? getActiveWorkspaceRaw(task)
+  }
+  return getActiveWorkspaceRaw(task)
+}
+
 export function syncLegacyFromActive(task: TaskWithWorkspaces): TaskWithWorkspaces {
   const active = getActiveWorkspaceRaw(task)
-  if (!active) {
+  const review = getReviewWorkspaceRaw(task)
+  if (!active && !review) {
     return {
       ...task,
       workplace_folder: null,
@@ -59,10 +72,10 @@ export function syncLegacyFromActive(task: TaskWithWorkspaces): TaskWithWorkspac
   }
   return {
     ...task,
-    workplace_folder: active.path,
-    workplace_index: active.workplace_index,
-    review_statuses: active.review_statuses,
-    review_schedule: active.review_schedule
+    workplace_folder: active?.path ?? null,
+    workplace_index: active?.workplace_index,
+    review_statuses: review?.review_statuses,
+    review_schedule: review?.review_schedule
   }
 }
 
@@ -111,6 +124,16 @@ export function getActiveWorkplacePath(task: TaskWithWorkspaces): string | null 
   return path || null
 }
 
+export function getReviewWorkspace(task: TaskWithWorkspaces): TaskWorkspace | null {
+  return getReviewWorkspaceRaw(migrateTaskWorkspaces(task))
+}
+
+export function getReviewWorkplacePath(task: TaskWithWorkspaces): string | null {
+  const review = getReviewWorkspace(task)
+  const path = review?.path?.trim()
+  return path || null
+}
+
 export function setActiveWorkspace(
   task: TaskWithWorkspaces,
   workspaceId: string
@@ -119,6 +142,16 @@ export function setActiveWorkspace(
   const exists = migrated.workspaces?.some((w) => w.id === workspaceId)
   if (!exists) return migrated
   return syncLegacyFromActive({ ...migrated, active_workspace_id: workspaceId })
+}
+
+export function setReviewWorkspace(
+  task: TaskWithWorkspaces,
+  workspaceId: string
+): TaskWithWorkspaces {
+  const migrated = migrateTaskWorkspaces(task)
+  const exists = migrated.workspaces?.some((w) => w.id === workspaceId)
+  if (!exists) return migrated
+  return syncLegacyFromActive({ ...migrated, review_workspace_id: workspaceId })
 }
 
 export function addWorkspace(
@@ -188,22 +221,23 @@ export function mergeTaskUpdate(
 ): TaskWithWorkspaces {
   let merged: TaskWithWorkspaces = { ...migrateTaskWorkspaces(task), ...updates }
 
-  if ('workspaces' in updates || 'active_workspace_id' in updates) {
+  if ('workspaces' in updates || 'active_workspace_id' in updates || 'review_workspace_id' in updates) {
     merged = migrateTaskWorkspaces(merged)
   }
 
-  const touchesLegacyWorkspaceFields =
-    'workplace_folder' in updates ||
-    'workplace_index' in updates ||
-    'review_statuses' in updates ||
-    'review_schedule' in updates
+  const touchesWorkplaceFields =
+    'workplace_folder' in updates || 'workplace_index' in updates
+  const touchesReviewFields =
+    'review_statuses' in updates || 'review_schedule' in updates
 
-  if (touchesLegacyWorkspaceFields) {
-    const activeId = merged.active_workspace_id ?? merged.workspaces?.[0]?.id
-    if (activeId && merged.workspaces?.length) {
-      merged.workspaces = merged.workspaces.map((w) => {
-        if (w.id !== activeId) return w
-        const next = { ...w }
+  if ((touchesWorkplaceFields || touchesReviewFields) && merged.workspaces?.length) {
+    const activeId = merged.active_workspace_id ?? merged.workspaces[0]?.id
+    const reviewId =
+      merged.review_workspace_id ?? merged.active_workspace_id ?? merged.workspaces[0]?.id
+
+    merged.workspaces = merged.workspaces.map((w) => {
+      const next = { ...w }
+      if (w.id === activeId && touchesWorkplaceFields) {
         if ('workplace_folder' in updates) {
           const nextPath = (updates.workplace_folder ?? w.path).trim()
           next.path = nextPath
@@ -215,15 +249,17 @@ export function mergeTaskUpdate(
         if ('workplace_index' in updates) {
           next.workplace_index = updates.workplace_index
         }
+      }
+      if (w.id === reviewId && touchesReviewFields) {
         if ('review_statuses' in updates) {
           next.review_statuses = updates.review_statuses
         }
         if ('review_schedule' in updates) {
           next.review_schedule = updates.review_schedule
         }
-        return next
-      })
-    }
+      }
+      return next
+    })
   }
 
   return syncLegacyFromActive(merged)

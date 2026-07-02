@@ -20,3 +20,7 @@ export function reviewActive(flags: FeatureFlags): boolean {
 export function smeValidatorActive(flags: FeatureFlags): boolean {
   return isFeatureEnabled(flags, 'smeValidator')
 }
+
+export function focusMonitorActive(flags: FeatureFlags): boolean {
+  return isFeatureEnabled(flags, 'focusMonitor')
+}
